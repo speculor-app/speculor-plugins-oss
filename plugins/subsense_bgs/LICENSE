@@ -1,0 +1,20 @@
+subsense_bgs — license
+======================
+
+This plugin is licensed under the Apache License, Version 2.0. The full license
+text is in the repository root `LICENSE`.
+
+Derived third-party code
+------------------------
+
+The CPU SuBSENSE implementation this plugin compiles (repository
+`common/bgs/subsense/`, including the LBSP descriptor) derives from the LITIV
+Framework:
+
+    Copyright (c) 2015 Pierre-Luc St-Charles
+    https://github.com/plstcharles/litiv
+    Licensed under the Apache License, Version 2.0.
+
+Each derived source file carries the LITIV copyright and Apache-2.0 banner. Some
+LITIV source is itself reimplemented from OpenCV (also Apache-2.0). See the
+repository-root `THIRD_PARTY_NOTICES.md`.

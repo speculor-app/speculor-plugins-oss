@@ -1,0 +1,299 @@
+#version 450
+
+// SuBSENSE per-frame processing shader (simplified GPU variant)
+// Per pixel: compute LBSP, compare against N bg samples using color+texture,
+// classify foreground/background, probabilistically update model
+//
+// Uses shared memory for the 5x5 LBSP neighborhood (20x20 tile for 16x16 workgroup)
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(push_constant) uniform PushConstants {
+    int width;
+    int height;
+    int num_channels;       // 1 or 3
+    int bg_samples;
+    int color_threshold;    // color distance threshold
+    int desc_threshold;     // hamming distance threshold for LBSP
+    int required_matches;   // min matches to classify as background
+    int learning_rate;      // 1/N update probability (e.g. 16 = 1/16)
+    uint frame_number;      // low 31 bits = frame counter, bit 31 = has_mask
+    int has_mask;
+    int width4;             // ceil(width/4)
+    int pad0;
+} pc;
+
+// binding 0: input frame (packed bytes as uint32)
+layout(std430, set = 0, binding = 0) readonly buffer InputFrame {
+    uint data[];
+} input_frame;
+
+// binding 1: background color samples
+layout(std430, set = 0, binding = 1) buffer BgColors {
+    uint data[];
+} bg_colors;
+
+// binding 2: background LBSP descriptors (uint16 per pixel per sample)
+layout(std430, set = 0, binding = 2) buffer BgDescs {
+    uint data[];
+} bg_descs;
+
+// binding 3: detection mask (packed bytes)
+layout(std430, set = 0, binding = 3) readonly buffer DetectMask {
+    uint data[];
+} detect_mask;
+
+// binding 4: output mask (packed bytes)
+layout(std430, set = 0, binding = 4) writeonly buffer OutputMask {
+    uint data[];
+} output_mask;
+
+// shared memory tile for luminance: 20x20 for 16x16 workgroup + 2-pixel border
+shared uint s_luma[20][20];
+
+// PCG hash
+uint pcg_hash(uint seed)
+{
+    uint state = seed * 747796405u + 2891336453u;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+// read one byte from input frame
+uint read_input_byte(int idx)
+{
+    return (input_frame.data[idx >> 2] >> ((idx & 3) * 8)) & 0xFFu;
+}
+
+// read one byte from bg_colors
+uint read_bg_byte(int idx)
+{
+    return (bg_colors.data[idx >> 2] >> ((idx & 3) * 8)) & 0xFFu;
+}
+
+// read one uint16 from bg_descs
+uint read_bg_desc(int idx)
+{
+    uint word_idx = uint(idx) >> 1u;
+    uint half_idx = uint(idx) & 1u;
+    return (bg_descs.data[word_idx] >> (half_idx * 16u)) & 0xFFFFu;
+}
+
+// read one byte from detection mask
+uint read_mask_byte(int idx)
+{
+    return (detect_mask.data[idx >> 2] >> ((idx & 3) * 8)) & 0xFFu;
+}
+
+// write one byte to output mask (atomic)
+void write_mask_byte(int idx, uint val)
+{
+    uint word_idx = uint(idx) >> 2u;
+    uint byte_idx = uint(idx) & 3u;
+    uint shift = byte_idx * 8u;
+    atomicAnd(output_mask.data[word_idx], ~(0xFFu << shift));
+    atomicOr(output_mask.data[word_idx], (val & 0xFFu) << shift);
+}
+
+// write one byte to bg_colors (atomic)
+void write_bg_byte(int idx, uint val)
+{
+    uint word_idx = uint(idx) >> 2u;
+    uint byte_idx = uint(idx) & 3u;
+    uint shift = byte_idx * 8u;
+    atomicAnd(bg_colors.data[word_idx], ~(0xFFu << shift));
+    atomicOr(bg_colors.data[word_idx], (val & 0xFFu) << shift);
+}
+
+// write one uint16 to bg_descs (atomic)
+void write_bg_desc(int idx, uint val)
+{
+    uint word_idx = uint(idx) >> 1u;
+    uint half_idx = uint(idx) & 1u;
+    uint shift = half_idx * 16u;
+    atomicAnd(bg_descs.data[word_idx], ~(0xFFFFu << shift));
+    atomicOr(bg_descs.data[word_idx], (val & 0xFFFFu) << shift);
+}
+
+// compute luminance from pixel at byte offset
+uint compute_luma_at(int byte_offset)
+{
+    if (pc.num_channels == 1)
+        return read_input_byte(byte_offset);
+
+    uint r = read_input_byte(byte_offset);
+    uint g = read_input_byte(byte_offset + 1);
+    uint b = read_input_byte(byte_offset + 2);
+    return (r * 77u + g * 150u + b * 29u) >> 8u;
+}
+
+// LBSP 16 comparison offsets (cross/diamond in 5x5)
+const ivec2 lbsp_offsets[16] = ivec2[16](
+    ivec2(-1, -2), ivec2( 0, -2), ivec2( 1, -2),
+    ivec2(-2, -1), ivec2(-1, -1), ivec2( 0, -1), ivec2( 1, -1), ivec2( 2, -1),
+    ivec2(-2,  0), ivec2(-1,  0), ivec2( 1,  0), ivec2( 2,  0),
+    ivec2(-1,  1), ivec2( 0,  1), ivec2( 1,  1),
+    ivec2( 0,  2)
+);
+
+void main()
+{
+    int lx = int(gl_LocalInvocationID.x);
+    int ly = int(gl_LocalInvocationID.y);
+    int gx = int(gl_GlobalInvocationID.x);
+    int gy = int(gl_GlobalInvocationID.y);
+
+    // tile origin in image coordinates (top-left of shared memory tile)
+    int tile_ox = int(gl_WorkGroupID.x) * 16 - 2;
+    int tile_oy = int(gl_WorkGroupID.y) * 16 - 2;
+
+    // load 20x20 luminance tile into shared memory
+    // each thread loads multiple elements to cover the full tile
+    for (int dy = ly; dy < 20; dy += 16)
+    {
+        for (int dx = lx; dx < 20; dx += 16)
+        {
+            int ix = clamp(tile_ox + dx, 0, pc.width - 1);
+            int iy = clamp(tile_oy + dy, 0, pc.height - 1);
+            int byte_off = (iy * pc.width + ix) * pc.num_channels;
+            s_luma[dy][dx] = compute_luma_at(byte_off);
+        }
+    }
+
+    barrier();
+
+    if (gx >= pc.width || gy >= pc.height) return;
+
+    int pixel = gy * pc.width + gx;
+
+    // check detection mask
+    if (pc.has_mask != 0)
+    {
+        if (read_mask_byte(pixel) == 0u)
+        {
+            write_mask_byte(pixel, 0u);
+            return;
+        }
+    }
+
+    // position within shared memory tile (center pixel)
+    int sx = lx + 2;
+    int sy = ly + 2;
+
+    uint center_luma = s_luma[sy][sx];
+
+    // compute LBSP descriptor from shared memory
+    int lbsp_thresh = pc.desc_threshold * 4; // internal LBSP comparison threshold
+    uint cur_desc = 0u;
+    for (int i = 0; i < 16; i++)
+    {
+        int nx = sx + lbsp_offsets[i].x;
+        int ny = sy + lbsp_offsets[i].y;
+        // clamp to tile bounds (already clamped at load time via image coord clamp)
+        nx = clamp(nx, 0, 19);
+        ny = clamp(ny, 0, 19);
+        uint n_luma = s_luma[ny][nx];
+
+        int diff = int(center_luma) - int(n_luma);
+        if (diff < 0) diff = -diff;
+        if (diff <= lbsp_thresh)
+            cur_desc |= (1u << uint(i));
+    }
+
+    // read current pixel color channels
+    int base = pixel * pc.num_channels;
+    uint cur_color[3];
+    for (int c = 0; c < pc.num_channels; c++)
+        cur_color[c] = read_input_byte(base + c);
+
+    // sample planes
+    int color_plane = pc.width * pc.height * pc.num_channels;
+    int desc_plane = pc.width * pc.height;
+
+    // compare against background samples
+    int matches = 0;
+    int color_thresh_sq = pc.color_threshold * pc.color_threshold;
+    // for multi-channel, scale by number of channels
+    if (pc.num_channels == 3)
+        color_thresh_sq *= 3;
+
+    for (int s = 0; s < pc.bg_samples; s++)
+    {
+        // color distance
+        int bg_color_base = s * color_plane + pixel * pc.num_channels;
+        int dist_sq = 0;
+        for (int c = 0; c < pc.num_channels; c++)
+        {
+            uint bg_val = read_bg_byte(bg_color_base + c);
+            int d = int(cur_color[c]) - int(bg_val);
+            dist_sq += d * d;
+        }
+
+        if (dist_sq > color_thresh_sq)
+            continue;
+
+        // LBSP hamming distance
+        int desc_idx = s * desc_plane + pixel;
+        uint bg_desc = read_bg_desc(desc_idx);
+        uint hamming = bitCount(cur_desc ^ bg_desc);
+
+        if (hamming <= uint(pc.desc_threshold))
+        {
+            matches++;
+            if (matches >= pc.required_matches)
+                break;
+        }
+    }
+
+    // classify
+    bool is_background = (matches >= pc.required_matches);
+
+    if (!is_background)
+    {
+        write_mask_byte(pixel, 255u);
+    }
+    else
+    {
+        write_mask_byte(pixel, 0u);
+
+        // probabilistic model update (ViBe-style)
+        uint actual_frame = pc.frame_number & 0x7FFFFFFFu;
+        uint seed = pcg_hash(uint(pixel) * 1664525u + actual_frame * 2654435761u);
+        uint r0 = pcg_hash(seed);
+        uint r1 = pcg_hash(seed + 1u);
+        uint r2 = pcg_hash(seed + 2u);
+        uint r3 = pcg_hash(seed + 3u);
+        uint r4 = pcg_hash(seed + 4u);
+
+        // update own model: 1/learning_rate probability
+        if ((r0 % uint(pc.learning_rate)) == 0u)
+        {
+            uint sample_idx = r1 % uint(pc.bg_samples);
+            int dst_color = int(sample_idx) * color_plane + pixel * pc.num_channels;
+            for (int c = 0; c < pc.num_channels; c++)
+                write_bg_byte(dst_color + c, cur_color[c]);
+
+            int dst_desc = int(sample_idx) * desc_plane + pixel;
+            write_bg_desc(dst_desc, cur_desc);
+        }
+
+        // update random neighbor model: 1/learning_rate probability
+        if ((r2 % uint(pc.learning_rate)) == 0u)
+        {
+            const int offsets_x[8] = int[8](-1, 0, 1, -1, 1, -1, 0, 1);
+            const int offsets_y[8] = int[8]( 1, 1, 1,  0, 0, -1,-1,-1);
+            int idx = int(r3 & 7u);
+            int nx = clamp(gx + offsets_x[idx], 0, pc.width - 1);
+            int ny = clamp(gy + offsets_y[idx], 0, pc.height - 1);
+            int neigh_pixel = ny * pc.width + nx;
+
+            uint sample_idx = r4 % uint(pc.bg_samples);
+            int dst_color = int(sample_idx) * color_plane + neigh_pixel * pc.num_channels;
+            for (int c = 0; c < pc.num_channels; c++)
+                write_bg_byte(dst_color + c, cur_color[c]);
+
+            int dst_desc = int(sample_idx) * desc_plane + neigh_pixel;
+            write_bg_desc(dst_desc, cur_desc);
+        }
+    }
+}

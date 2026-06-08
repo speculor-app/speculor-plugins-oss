@@ -1,0 +1,279 @@
+/*
+ *   Derived from the LITIV Framework (https://github.com/plstcharles/litiv)
+ *   Copyright (c) 2015 Pierre-Luc St-Charles
+ *   Modified for Speculor (spclib)
+ *
+ *   Licensed under the Apache License, Version 2.0 (the "License");
+ *   you may not use this file except in compliance with the License.
+ *   You may obtain a copy of the License at
+ *
+ *       http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *   Unless required by applicable law or agreed to in writing, software
+ *   distributed under the License is distributed on an "AS IS" BASIS,
+ *   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *   See the License for the specific language governing permissions and
+ *   limitations under the License.
+ *
+ *   The ViBe algorithm is patented in some jurisdictions; see
+ *   THIRD_PARTY_NOTICES.md.
+ */
+
+#pragma once
+
+#include <iostream>
+#include <array>
+#include <memory>
+#include <vector>
+
+namespace spclib::bgs
+{
+    template<class T>
+    static inline auto l2_dist3_squared(const T *const a, const T *const b)
+    {
+        using DiffType = std::conditional_t<sizeof(T) == 1, int32_t, int64_t>;
+        const DiffType r0{(DiffType)a[0] - (DiffType)b[0]};
+        const DiffType r1{(DiffType)a[1] - (DiffType)b[1]};
+        const DiffType r2{(DiffType)a[2] - (DiffType)b[2]};
+        return (r0 * r0) + (r1 * r1) + (r2 * r2);
+    }
+
+    static inline int get_neighbor_position_3x3_old(const int x, const int y, const ImgSize &oImageSize, const uint32_t nRandIdx)
+    {
+        typedef std::array<int, 2> Nb;
+        static constexpr std::array<Nb, 8> s_anNeighborPattern = {
+            Nb{-1, 1},
+            Nb{0, 1},
+            Nb{1, 1},
+            Nb{-1, 0},
+            Nb{1, 0},
+            Nb{-1, -1},
+            Nb{0, -1},
+            Nb{1, -1},
+        };
+        const size_t r{nRandIdx & 0x7};
+        const int nNeighborCoord_X{std::max(std::min(x + s_anNeighborPattern[r][0], oImageSize.width - 1), 0)};
+        const int nNeighborCoord_Y{std::max(std::min(y + s_anNeighborPattern[r][1], oImageSize.height - 1), 0)};
+        return (nNeighborCoord_Y * oImageSize.width + nNeighborCoord_X);
+    }
+
+    static inline int get_neighbor_position_3x3(const int x, const int y, const ImgSize &oImageSize, const uint32_t nRandIdx)
+    {
+        // Using separate X and Y arrays avoids 2D array lookup
+        static constexpr int8_t s_offsetsX[] = {-1, 0, 1, -1, 1, -1, 0, 1};
+        static constexpr int8_t s_offsetsY[] = {1, 1, 1, 0, 0, -1, -1, -1};
+
+        // Extract the index with bit masking
+        const size_t r = nRandIdx & 0x7;
+
+        // Calculate neighbor coordinates
+        const int nx = x + s_offsetsX[r];
+        const int ny = y + s_offsetsY[r];
+
+        // Clamp coordinates using ternary operations which may compile to branchless code
+        const int clamped_x = (nx < 0) ? 0 : ((nx >= oImageSize.width) ? (oImageSize.width - 1) : nx);
+        const int clamped_y = (ny < 0) ? 0 : ((ny >= oImageSize.height) ? (oImageSize.height - 1) : ny);
+
+        // Calculate linear position
+        return clamped_y * oImageSize.width + clamped_x;
+    }
+
+    /// returns pixel coordinates clamped to the given image & border size
+    inline void clamp_image_coords(int &nSampleCoord_X, int &nSampleCoord_Y, const ImgSize &oImageSize)
+    {
+        nSampleCoord_X = std::clamp(nSampleCoord_X, 0, oImageSize.width - 1);
+        nSampleCoord_Y = std::clamp(nSampleCoord_Y, 0, oImageSize.height - 1);
+    }
+
+    /// returns the sampling location for the specified random index & original pixel location, given a predefined kernel; also guards against out-of-bounds values via image/border size check
+    template <int nKernelHeight, int nKernelWidth>
+    inline void get_sample_position(const std::array<std::array<int, nKernelWidth>, nKernelHeight> &anSamplesInitPattern,
+                                  const int nSamplesInitPatternTot, const int nRandIdx, int &nSampleCoord_X, int &nSampleCoord_Y,
+                                  const int nOrigCoord_X, const int nOrigCoord_Y, const ImgSize &oImageSize)
+    {
+        int r = 1 + (nRandIdx % nSamplesInitPatternTot);
+        bool found = false;
+
+        for (nSampleCoord_Y = 0; !found && nSampleCoord_Y < nKernelHeight; ++nSampleCoord_Y)
+        {
+            for (nSampleCoord_X = 0; nSampleCoord_X < nKernelWidth; ++nSampleCoord_X)
+            {
+                r -= anSamplesInitPattern[nSampleCoord_Y][nSampleCoord_X];
+                if (r <= 0)
+                {
+                    found = true;
+                    break;
+                }
+            }
+        }
+
+        nSampleCoord_X += nOrigCoord_X - nKernelWidth / 2;
+        nSampleCoord_Y += nOrigCoord_Y - nKernelHeight / 2 - 1;
+        clamp_image_coords(nSampleCoord_X, nSampleCoord_Y, oImageSize);
+    }
+
+    /// returns the sampling location for the specified random index & original pixel location; also guards against out-of-bounds values via image/border size check
+    inline void get_sample_position_7x7_std2(const int nRandIdx,
+                                           int &nSampleCoord_X, int &nSampleCoord_Y,
+                                           const int nOrigCoord_X, const int nOrigCoord_Y,
+                                           const ImgSize &oImageSize)
+    {
+        // based on 'floor(fspecial('gaussian',7,2)*512)'
+        static constexpr int s_nSamplesInitPatternTot = 512;
+        static constexpr std::array<std::array<int, 7>, 7> s_anSamplesInitPattern = {
+            std::array<int, 7>{ 2,  4,  6,  7,  6,  4,  2 },
+            std::array<int, 7>{ 4,  8, 12, 14, 12,  8,  4 },
+            std::array<int, 7>{ 6, 12, 21, 25, 21, 12,  6 },
+            std::array<int, 7>{ 7, 14, 25, 28, 25, 14,  7 },
+            std::array<int, 7>{ 6, 12, 21, 25, 21, 12,  6 },
+            std::array<int, 7>{ 4,  8, 12, 14, 12,  8,  4 },
+            std::array<int, 7>{ 2,  4,  6,  7,  6,  4,  2 },
+        };
+        get_sample_position<7, 7>(s_anSamplesInitPattern, s_nSamplesInitPatternTot, nRandIdx, nSampleCoord_X, nSampleCoord_Y, nOrigCoord_X, nOrigCoord_Y, oImageSize);
+    }
+
+    static inline void split_img(const Img &_inputImg, std::vector<std::unique_ptr<Img>> &_outputImages, int _numSplits)
+    {
+        _outputImages.resize(_numSplits);
+        int y = 0;
+        int h = _inputImg.size.height / _numSplits;
+        for (int i = 0; i < _numSplits; ++i)
+        {
+            if (i == (_numSplits - 1))
+            {
+                h = _inputImg.size.height - y;
+            }
+            _outputImages[i] = Img::create(ImgSize(_inputImg.size.width, h, _inputImg.size.num_channels, _inputImg.size.bytes_per_channel, y * _inputImg.size.width), false);
+
+            memcpy(_outputImages[i]->data,
+                   _inputImg.data + (_outputImages[i]->size.original_pixel_pos * _inputImg.size.num_channels * _inputImg.size.bytes_per_channel),
+                   _outputImages[i]->size.size_in_bytes);
+            y += h;
+        }
+    }
+
+    class VibeParams 
+        : public CoreParameters
+    {
+    public:
+        /// defines the default value for ColorDistThreshold
+        static const uint32_t DEFAULT_THRESHOLD{50};
+        /// defines the default value for BGSamples
+        static const uint32_t DEFAULT_NB_BG_SAMPLES{16};
+        /// defines the default value for RequiredBGSamples
+        static const uint32_t DEFAULT_REQUIRED_NB_BG_SAMPLES{1};
+        /// defines the default value for the learning rate passed to the 'subsampling' factor in the original ViBe paper
+        /// needs to be a power of 2
+        static const uint32_t DEFAULT_LEARNING_RATE{2};
+
+        VibeParams()
+            : VibeParams(DEFAULT_THRESHOLD, 
+                DEFAULT_NB_BG_SAMPLES, 
+                DEFAULT_REQUIRED_NB_BG_SAMPLES, 
+                DEFAULT_LEARNING_RATE)
+        {
+        }
+
+        VibeParams(uint32_t _threshold,
+                   uint32_t _bgSamples,
+                   uint32_t _requiredBGSamples,
+                   uint32_t _learningRate)
+            : CoreParameters()
+        {
+            set_threshold(_threshold);
+            set_learning_rate(_learningRate);
+            set_bg_samples(_bgSamples);
+            set_required_bg_samples(_requiredBGSamples);
+        }
+
+        VibeParams(const VibeParams& _params)
+            : CoreParameters()
+        {
+            set_threshold(_params.threshold_mono);
+            set_learning_rate(_params.learning_rate);
+            set_bg_samples(_params.bg_samples);
+            set_required_bg_samples(_params.required_bg_samples);
+        }
+
+        uint32_t get_threshold() const { return threshold_mono; }
+        uint32_t get_bg_samples() const { return bg_samples; }
+        uint32_t get_required_bg_samples() const { return required_bg_samples; }
+        uint32_t get_learning_rate() const { return learning_rate; }
+
+        void set_threshold(uint32_t value) 
+        { 
+            threshold_mono = value; 
+            threshold_color_squared = (threshold_mono * 3) * (threshold_mono * 3);
+            threshold_mono16 = threshold_mono * 256;
+            threshold_color16_squared = static_cast<uint64_t>(threshold_mono16 * 3) * static_cast<uint64_t>(threshold_mono16 * 3);
+        }
+        void set_bg_samples(uint32_t value)
+        {
+            if (value > 1)
+            {
+                bg_samples = get_higher_value_bit(value);
+                // Clamp to the apply() bg_ptrs[MAX_BG_SAMPLES] stack-array bound
+                // (Vibe.cpp, = 64). get_higher_value_bit can exceed it (e.g.
+                // value >= 128 -> 128), which would overflow bg_ptrs.
+                if (bg_samples > 64) bg_samples = 64;
+                and_bg_samples = bg_samples - 1;
+            }
+            else
+            {
+                bg_samples = 2;
+                and_bg_samples = 1;
+            }
+            if (m_core_bgs != nullptr)
+            {
+                m_core_bgs->restart();
+            }
+        }
+        void set_required_bg_samples(uint32_t value) 
+        { 
+            required_bg_samples = value; 
+        }
+        void set_learning_rate(uint32_t value) 
+        { 
+            if (value > 1) 
+            {
+                learning_rate = get_higher_value_bit(value);
+                and_learning_rate = learning_rate - 1;
+            }
+            else
+            {
+                learning_rate = 1;
+                and_learning_rate = 0;
+            }
+        }
+
+        friend class Vibe;
+
+    protected:
+        /// number of different samples per pixel/block to be taken from input frames to build the background model ('N' in the original ViBe paper)
+        /// must be a power of 2
+        uint32_t bg_samples;
+        /// bitmask for random sample selection: bg_samples - 1
+        uint32_t and_bg_samples;
+        /// number of similar samples needed to consider the current pixel/block as 'background' ('#_min' in the original ViBe paper)
+        uint32_t required_bg_samples;
+        /// absolute color distance threshold ('R' or 'radius' in the original ViBe paper)
+        uint32_t threshold_mono;
+        uint64_t threshold_color_squared;
+        uint32_t threshold_mono16;
+        uint64_t threshold_color16_squared;
+        /// should be > 1 and factor of 2 (smaller values == faster adaptation)
+        uint32_t learning_rate;
+        uint32_t and_learning_rate;
+
+        static uint32_t get_higher_value_bit(uint32_t value)
+        {
+            // Find the position of the highest bit set
+            value |= value >> 1;
+            value |= value >> 2;
+            value |= value >> 4;
+            value |= value >> 8;
+            value |= value >> 16;
+            return value - (value >> 1);
+        }
+    };
+}

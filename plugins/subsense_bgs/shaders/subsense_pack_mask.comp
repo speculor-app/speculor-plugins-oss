@@ -1,0 +1,38 @@
+#version 450
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform PushConstants {
+    int width;
+    int height;
+    int num_channels;
+    int bg_samples;
+    int color_threshold;
+    int desc_threshold;
+    int required_matches;
+    int learning_rate;
+    uint frame_number;
+    int has_mask;
+    int width4;
+    int pad0;
+} pc;
+
+layout(std430, set = 0, binding = 4) readonly buffer WideMask { uint data[]; } wide_mask;
+layout(std430, set = 0, binding = 5) writeonly buffer PackedMask { uint data[]; } packed_mask;
+
+void main()
+{
+    uint word_idx = gl_GlobalInvocationID.x;
+    uint base_pixel = word_idx * 4;
+    uint total_pixels = uint(pc.width * pc.height);
+    if (base_pixel >= total_pixels) return;
+
+    uint out_word = 0;
+    for (uint i = 0; i < 4; ++i) {
+        uint pixel = base_pixel + i;
+        if (pixel >= total_pixels) break;
+        uint val = wide_mask.data[pixel] & 0xFFu;
+        out_word |= val << (i * 8);
+    }
+    packed_mask.data[word_idx] = out_word;
+}

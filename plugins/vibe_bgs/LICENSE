@@ -1,0 +1,26 @@
+vibe_bgs — license
+==================
+
+This plugin is licensed under the Apache License, Version 2.0. The full license
+text is in the repository root `LICENSE`.
+
+Derived third-party code
+------------------------
+
+The CPU ViBe implementation this plugin compiles (repository `common/bgs/vibe/`
+and `common/bgs/subsense/LBSP.hpp`) derives from the LITIV Framework:
+
+    Copyright (c) 2015 Pierre-Luc St-Charles
+    https://github.com/plstcharles/litiv
+    Licensed under the Apache License, Version 2.0.
+
+Each derived source file carries the LITIV copyright and Apache-2.0 banner.
+
+Patent note
+-----------
+
+The ViBe algorithm (Barnich & Van Droogenbroeck, University of Liège) is patented
+in some jurisdictions. The Apache-2.0 patent grant in the LITIV license is made by
+the LITIV authors and does not extend to that third-party patent. Recipients are
+responsible for determining whether a patent license is required in their
+jurisdiction. See the repository-root `THIRD_PARTY_NOTICES.md`.

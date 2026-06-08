@@ -1,0 +1,203 @@
+#version 450
+
+// ViBe per-frame processing — hybrid layout
+// BG model: packed, output mask: uint32 per pixel (no atomics on mask)
+// Supports 8-bit and 16-bit input
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(push_constant) uniform PushConstants {
+    int width;
+    int height;
+    int num_channels;
+    int bg_samples;
+    int threshold;
+    int required_bg_samples;
+    int learning_rate_and;
+    int bg_samples_and;
+    uint frame_number;
+    int bytes_per_channel;
+} pc;
+
+layout(std430, set = 0, binding = 0) readonly buffer InputFrame {
+    uint data[];
+} input_frame;
+
+layout(std430, set = 0, binding = 1) buffer BackgroundModel {
+    uint data[];
+} bg_model;
+
+layout(std430, set = 0, binding = 2) buffer OutputMask {
+    uint data[];
+} output_mask;
+
+layout(std430, set = 0, binding = 3) readonly buffer DetectMask {
+    uint data[];
+} detect_mask;
+
+uint pcg_hash(uint seed)
+{
+    uint state = seed * 747796405u + 2891336453u;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+uint read_input_element(uint element_offset)
+{
+    if (pc.bytes_per_channel == 1)
+    {
+        uint word_idx = element_offset >> 2u;
+        uint byte_idx = element_offset & 3u;
+        return (input_frame.data[word_idx] >> (byte_idx * 8u)) & 0xFFu;
+    }
+    else
+    {
+        uint word_idx = element_offset >> 1u;
+        uint half_idx = element_offset & 1u;
+        return (input_frame.data[word_idx] >> (half_idx * 16u)) & 0xFFFFu;
+    }
+}
+
+uint read_bg_element(uint element_offset)
+{
+    if (pc.bytes_per_channel == 1)
+    {
+        uint word_idx = element_offset >> 2u;
+        uint byte_idx = element_offset & 3u;
+        return (bg_model.data[word_idx] >> (byte_idx * 8u)) & 0xFFu;
+    }
+    else
+    {
+        uint word_idx = element_offset >> 1u;
+        uint half_idx = element_offset & 1u;
+        return (bg_model.data[word_idx] >> (half_idx * 16u)) & 0xFFFFu;
+    }
+}
+
+uint read_mask_byte(uint byte_offset)
+{
+    uint word_idx = byte_offset >> 2u;
+    uint byte_idx = byte_offset & 3u;
+    return (detect_mask.data[word_idx] >> (byte_idx * 8u)) & 0xFFu;
+}
+
+void write_bg_element(uint element_offset, uint value)
+{
+    if (pc.bytes_per_channel == 1)
+    {
+        uint word_idx = element_offset >> 2u;
+        uint byte_idx = element_offset & 3u;
+        uint shift = byte_idx * 8u;
+        atomicAnd(bg_model.data[word_idx], ~(0xFFu << shift));
+        atomicOr(bg_model.data[word_idx], (value & 0xFFu) << shift);
+    }
+    else
+    {
+        uint word_idx = element_offset >> 1u;
+        uint half_idx = element_offset & 1u;
+        uint shift = half_idx * 16u;
+        atomicAnd(bg_model.data[word_idx], ~(0xFFFFu << shift));
+        atomicOr(bg_model.data[word_idx], (value & 0xFFFFu) << shift);
+    }
+}
+
+void main()
+{
+    int x = int(gl_GlobalInvocationID.x);
+    int y = int(gl_GlobalInvocationID.y);
+    if (x >= pc.width || y >= pc.height) return;
+
+    int pixel_idx = y * pc.width + x;
+    bool has_detect_mask = (pc.frame_number & 0x80000000u) != 0u;
+    uint actual_frame = pc.frame_number & 0x7FFFFFFFu;
+
+    if (has_detect_mask)
+    {
+        if (read_mask_byte(uint(pixel_idx)) == 0u)
+        {
+            output_mask.data[pixel_idx] = 0u;
+            return;
+        }
+    }
+
+    uint elements_per_sample = uint(pc.width * pc.height * pc.num_channels);
+    uint pixel_element_offset = uint(pixel_idx * pc.num_channels);
+
+    uint cur[3];
+    for (int c = 0; c < pc.num_channels; ++c)
+        cur[c] = read_input_element(pixel_element_offset + uint(c));
+
+    uint good_count = 0u;
+    int color_threshold_sq = pc.threshold * pc.threshold * 9;
+
+    for (int s = 0; s < pc.bg_samples; ++s)
+    {
+        uint s_base = uint(s) * elements_per_sample + pixel_element_offset;
+
+        if (pc.num_channels == 1)
+        {
+            uint bg_val = read_bg_element(s_base);
+            int diff = int(cur[0]) - int(bg_val);
+            if (diff < 0) diff = -diff;
+            if (diff < pc.threshold)
+            {
+                good_count++;
+                if (good_count >= uint(pc.required_bg_samples)) break;
+            }
+        }
+        else
+        {
+            int dist_sq = 0;
+            for (int c = 0; c < 3; ++c)
+            {
+                uint bg_val = read_bg_element(s_base + uint(c));
+                int diff = int(cur[c]) - int(bg_val);
+                dist_sq += diff * diff;
+            }
+            if (dist_sq < color_threshold_sq)
+            {
+                good_count++;
+                if (good_count >= uint(pc.required_bg_samples)) break;
+            }
+        }
+    }
+
+    if (good_count < uint(pc.required_bg_samples))
+    {
+        output_mask.data[pixel_idx] = 255u;
+    }
+    else
+    {
+        output_mask.data[pixel_idx] = 0u;
+
+        uint seed = pcg_hash(uint(pixel_idx) * 1664525u + actual_frame * 2654435761u);
+        uint r0 = pcg_hash(seed);
+        uint r1 = pcg_hash(seed + 1u);
+        uint r2 = pcg_hash(seed + 2u);
+        uint r3 = pcg_hash(seed + 3u);
+        uint r4 = pcg_hash(seed + 4u);
+
+        if ((r0 & uint(pc.learning_rate_and)) == 0u)
+        {
+            uint sample_idx = r1 & uint(pc.bg_samples_and);
+            uint dst = sample_idx * elements_per_sample + pixel_element_offset;
+            for (int c = 0; c < pc.num_channels; ++c)
+                write_bg_element(dst + uint(c), cur[c]);
+        }
+
+        if ((r2 & uint(pc.learning_rate_and)) == 0u)
+        {
+            const int offsets_x[8] = int[8](-1, 0, 1, -1, 1, -1, 0, 1);
+            const int offsets_y[8] = int[8]( 1, 1, 1,  0, 0, -1,-1,-1);
+            int idx = int(r3 & 7u);
+            int nx = clamp(x + offsets_x[idx], 0, pc.width - 1);
+            int ny = clamp(y + offsets_y[idx], 0, pc.height - 1);
+            int neigh_idx = ny * pc.width + nx;
+
+            uint sample_idx = r4 & uint(pc.bg_samples_and);
+            uint dst = sample_idx * elements_per_sample + uint(neigh_idx * pc.num_channels);
+            for (int c = 0; c < pc.num_channels; ++c)
+                write_bg_element(dst + uint(c), cur[c]);
+        }
+    }
+}

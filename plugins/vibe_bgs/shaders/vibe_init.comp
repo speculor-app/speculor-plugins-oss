@@ -1,0 +1,114 @@
+#version 450
+
+// ViBe background model initialization shader
+// Samples neighbors from the first frame using a hash-based PRNG
+// Supports 8-bit (1 byte/channel) and 16-bit (2 bytes/channel)
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(push_constant) uniform PushConstants {
+    int width;
+    int height;
+    int num_channels;
+    int bg_samples;
+    int threshold;
+    int required_bg_samples;
+    int learning_rate_and;
+    int bg_samples_and;
+    uint frame_number;
+    int bytes_per_channel;  // 1 = uint8, 2 = uint16
+} pc;
+
+// input frame (packed into uint32: 4 bytes or 2 uint16 per word)
+layout(std430, set = 0, binding = 0) readonly buffer InputFrame {
+    uint data[];
+} input_frame;
+
+// background model (same packing as input)
+layout(std430, set = 0, binding = 1) buffer BackgroundModel {
+    uint data[];
+} bg_model;
+
+uint pcg_hash(uint seed)
+{
+    uint state = seed * 747796405u + 2891336453u;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+ivec2 get_neighbor(int x, int y, uint rand_val)
+{
+    const int offsets_x[8] = int[8](-1, 0, 1, -1, 1, -1, 0, 1);
+    const int offsets_y[8] = int[8]( 1, 1, 1,  0, 0, -1,-1,-1);
+    int idx = int(rand_val & 7u);
+    return ivec2(clamp(x + offsets_x[idx], 0, pc.width - 1),
+                 clamp(y + offsets_y[idx], 0, pc.height - 1));
+}
+
+// read one channel element (uint8 or uint16) from a packed buffer
+uint read_element(uint element_offset)
+{
+    if (pc.bytes_per_channel == 1)
+    {
+        uint word_idx = element_offset >> 2u;
+        uint byte_idx = element_offset & 3u;
+        return (input_frame.data[word_idx] >> (byte_idx * 8u)) & 0xFFu;
+    }
+    else
+    {
+        // 16-bit: 2 elements per uint32
+        uint word_idx = element_offset >> 1u;
+        uint half_idx = element_offset & 1u;
+        return (input_frame.data[word_idx] >> (half_idx * 16u)) & 0xFFFFu;
+    }
+}
+
+// write one channel element to bg_model (atomic for packed writes)
+void write_bg_element(uint element_offset, uint value)
+{
+    if (pc.bytes_per_channel == 1)
+    {
+        uint word_idx = element_offset >> 2u;
+        uint byte_idx = element_offset & 3u;
+        uint shift = byte_idx * 8u;
+        atomicAnd(bg_model.data[word_idx], ~(0xFFu << shift));
+        atomicOr(bg_model.data[word_idx], (value & 0xFFu) << shift);
+    }
+    else
+    {
+        uint word_idx = element_offset >> 1u;
+        uint half_idx = element_offset & 1u;
+        uint shift = half_idx * 16u;
+        atomicAnd(bg_model.data[word_idx], ~(0xFFFFu << shift));
+        atomicOr(bg_model.data[word_idx], (value & 0xFFFFu) << shift);
+    }
+}
+
+void main()
+{
+    int x = int(gl_GlobalInvocationID.x);
+    int y = int(gl_GlobalInvocationID.y);
+    if (x >= pc.width || y >= pc.height) return;
+
+    int pixel_idx = y * pc.width + x;
+    // elements per sample plane (in channel units, not bytes)
+    uint elements_per_sample = uint(pc.width * pc.height * pc.num_channels);
+
+    uint seed = uint(pixel_idx) * 1664525u + 1013904223u;
+
+    for (int s = 0; s < pc.bg_samples; ++s)
+    {
+        seed = pcg_hash(seed + uint(s) * 2654435761u);
+        ivec2 neighbor = get_neighbor(x, y, seed);
+        int src_idx = neighbor.y * pc.width + neighbor.x;
+
+        uint dst_base = uint(s) * elements_per_sample + uint(pixel_idx * pc.num_channels);
+        uint src_base = uint(src_idx * pc.num_channels);
+
+        for (int c = 0; c < pc.num_channels; ++c)
+        {
+            uint val = read_element(src_base + uint(c));
+            write_bg_element(dst_base + uint(c), val);
+        }
+    }
+}

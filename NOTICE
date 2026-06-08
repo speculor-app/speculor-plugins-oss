@@ -1,0 +1,28 @@
+Speculor Open-Source Plugins
+Copyright 2026 Fabio Barros
+
+This product includes software developed by Fabio Barros, licensed under the
+Apache License, Version 2.0 (see LICENSE), except where an individual plugin
+directory or source file states otherwise.
+
+Unlike the example-plugins repository, this repository VENDORS third-party-derived
+source code, because these plugins exist precisely to carry open-source
+obligations:
+
+  * common/bgs/ — the ViBe and SuBSENSE background-subtraction algorithms and the
+    LBSP descriptor derive from the LITIV Framework (Apache-2.0, © 2015
+    Pierre-Luc St-Charles). The ViBe algorithm is additionally patent-encumbered
+    in some jurisdictions. See THIRD_PARTY_NOTICES.md and plugins/vibe_bgs/LICENSE.
+
+  * plugins/rtl_sdr links librtlsdr (LGPL-2.1-or-later), loaded at runtime. See
+    THIRD_PARTY_NOTICES.md and plugins/rtl_sdr/LICENSE.
+
+When compiled, every plugin also links the Speculor Plugin SDK and, through it,
+the third-party libraries bundled in the SDK (OpenCV, FFmpeg, Vulkan, and
+others). Those components are governed by their own terms, reproduced in
+THIRD_PARTY_NOTICES.md inside the Speculor SDK distribution you build against:
+
+  <https://github.com/speculor-app/speculor-sdk-dist/releases>
+
+Redistributing a built plugin binary carries the corresponding third-party
+attribution (and, for librtlsdr, LGPL relinking) obligations.

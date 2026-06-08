@@ -1,0 +1,100 @@
+name: Build plugins
+
+# Builds the open-source plugins against the latest PUBLISHED Speculor SDK bundle
+# from speculor-sdk-dist. The bundle is self-contained, so no vcpkg or system
+# OpenCV/FFmpeg is needed — only a compiler + Ninja (+ a few system libs on Linux).
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: Linux,   os: ubuntu-latest,  asset: 'SpeculorSDK-*-Linux-x86_64.tar.gz' }
+          - { name: Windows, os: windows-latest, asset: 'SpeculorSDK-*-Windows-x64.zip' }
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download latest SDK bundle
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p sdk
+          gh release download -R speculor-app/speculor-sdk-dist \
+            --pattern '${{ matrix.asset }}' --dir sdk
+          ls -la sdk
+
+      - name: Extract SDK + locate root
+        id: sdk
+        shell: bash
+        run: |
+          mkdir -p sdk/x
+          if ls sdk/*.zip >/dev/null 2>&1; then
+            unzip -q sdk/*.zip -d sdk/x
+          else
+            tar -xzf sdk/*.tar.gz -C sdk/x
+          fi
+          cfg=$(find "$PWD/sdk/x" -name SpeculorSDKConfig.cmake | head -1)
+          if [ -z "$cfg" ]; then echo "::error::SpeculorSDKConfig.cmake not found in bundle"; exit 1; fi
+          root="${cfg%/lib/cmake/SpeculorSDK/SpeculorSDKConfig.cmake}"
+          echo "root=$root" >> "$GITHUB_OUTPUT"
+          echo "Resolved SDK root: $root"
+
+      # ── Linux toolchain ──────────────────────────────────────────────
+      # ninja to build; libva/libdrm because the SDK's bundled FFmpeg is built with
+      # VA-API (linking spclib pulls -lva/-lva-drm); libtbb-dev for ViBe's
+      # std::execution::par (libstdc++ routes it through Intel TBB).
+      - name: Install Linux build deps
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ninja-build libva-dev libdrm-dev libtbb-dev librtlsdr-dev
+
+      # ── Windows toolchain (MSVC + Ninja) ─────────────────────────────
+      - name: Setup MSVC dev environment (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vsw = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vsw)) { throw "vswhere not found at $vsw" }
+          $vsPath = & $vsw -latest -prerelease -products * -property installationPath
+          if (-not $vsPath) { throw "vswhere found no Visual Studio instance" }
+          $vcvars = Join-Path $vsPath "VC\Auxiliary\Build\vcvarsall.bat"
+          if (-not (Test-Path $vcvars)) { throw "vcvarsall.bat not at $vcvars" }
+          $output = cmd /c "`"$vcvars`" x64 && set"
+          foreach ($line in $output) {
+              if ($line -match '^([A-Za-z_][A-Za-z0-9_]*)=(.*)$') {
+                  "$($matches[1])=$($matches[2])" |
+                      Out-File -Append -Encoding utf8 -FilePath $env:GITHUB_ENV
+              }
+          }
+
+      - name: Setup Ninja (Windows)
+        if: runner.os == 'Windows'
+        uses: seanmiddleditch/gha-setup-ninja@v6
+
+      # ── Configure + build ────────────────────────────────────────────
+      - name: Configure
+        shell: bash
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="${{ steps.sdk.outputs.root }}"
+
+      - name: Build
+        shell: bash
+        run: cmake --build build
+
+      - name: List built plugins
+        shell: bash
+        run: ls -la build/plugins

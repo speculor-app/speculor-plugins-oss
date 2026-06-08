@@ -1,0 +1,20 @@
+rtl_sdr — license
+=================
+
+The plugin's own source (rtl_sdr_plugin.cpp, rtl_sdr_device.{h,cpp},
+winradio_common.h) is licensed under the Apache License, Version 2.0. The full
+license text is in the repository root `LICENSE`.
+
+Linked third-party library
+--------------------------
+
+This plugin uses the RTL-SDR API and loads `librtlsdr` at runtime:
+
+    rtl-sdr-blog fork — https://github.com/rtlsdrblog/rtl-sdr-blog
+    GNU Lesser General Public License, version 2.1 or later (LGPL-2.1-or-later).
+
+Only the `rtl-sdr.h` header is used at compile time; the library
+(`rtlsdr.dll` / `librtlsdr.so`) is loaded dynamically via `LoadLibrary`/`dlopen`,
+so it remains user-replaceable. Redistributing this plugin alongside that library
+carries the LGPL attribution and source-availability obligations for librtlsdr.
+See the repository-root `THIRD_PARTY_NOTICES.md`.

@@ -1,0 +1,167 @@
+#version 450
+
+// SuBSENSE background model initialization shader
+// Fills N background samples per pixel from first frame + small random noise
+// Computes initial LBSP descriptor per sample using luminance
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(push_constant) uniform PushConstants {
+    int width;
+    int height;
+    int num_channels;       // 1 or 3
+    int bg_samples;
+    int color_threshold;
+    int desc_threshold;
+    int required_matches;
+    int learning_rate;
+    uint frame_number;
+    int has_mask;
+    int width4;             // ceil(width/4)
+    int pad0;
+} pc;
+
+// binding 0: input frame (packed bytes as uint32)
+layout(std430, set = 0, binding = 0) readonly buffer InputFrame {
+    uint data[];
+} input_frame;
+
+// binding 1: background color samples — N * pixels * channels bytes packed as uint32
+layout(std430, set = 0, binding = 1) buffer BgColors {
+    uint data[];
+} bg_colors;
+
+// binding 2: background LBSP descriptors — N * pixels uint16 packed as uint32
+layout(std430, set = 0, binding = 2) buffer BgDescs {
+    uint data[];
+} bg_descs;
+
+// binding 3: detection mask (packed bytes)
+layout(std430, set = 0, binding = 3) readonly buffer DetectMask {
+    uint data[];
+} detect_mask;
+
+// binding 4: output mask (packed bytes)
+layout(std430, set = 0, binding = 4) writeonly buffer OutputMask {
+    uint data[];
+} output_mask;
+
+// PCG hash for pseudo-random numbers
+uint pcg_hash(uint seed)
+{
+    uint state = seed * 747796405u + 2891336453u;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+// read one byte from input frame
+uint read_input_byte(int idx)
+{
+    return (input_frame.data[idx >> 2] >> ((idx & 3) * 8)) & 0xFFu;
+}
+
+// write one byte to bg_colors (atomic for packed access)
+void write_bg_byte(int idx, uint val)
+{
+    uint word_idx = uint(idx) >> 2u;
+    uint byte_idx = uint(idx) & 3u;
+    uint shift = byte_idx * 8u;
+    atomicAnd(bg_colors.data[word_idx], ~(0xFFu << shift));
+    atomicOr(bg_colors.data[word_idx], (val & 0xFFu) << shift);
+}
+
+// write one uint16 descriptor to bg_descs (atomic for packed access)
+void write_bg_desc(int idx, uint val)
+{
+    uint word_idx = uint(idx) >> 1u;
+    uint half_idx = uint(idx) & 1u;
+    uint shift = half_idx * 16u;
+    atomicAnd(bg_descs.data[word_idx], ~(0xFFFFu << shift));
+    atomicOr(bg_descs.data[word_idx], (val & 0xFFFFu) << shift);
+}
+
+// compute luminance from pixel at given byte offset
+uint compute_luma(int byte_offset)
+{
+    if (pc.num_channels == 1)
+        return read_input_byte(byte_offset);
+
+    uint r = read_input_byte(byte_offset);
+    uint g = read_input_byte(byte_offset + 1);
+    uint b = read_input_byte(byte_offset + 2);
+    return (r * 77u + g * 150u + b * 29u) >> 8u;
+}
+
+// LBSP 16 comparison offsets (cross/diamond pattern in 5x5 neighborhood)
+const ivec2 lbsp_offsets[16] = ivec2[16](
+    ivec2(-1, -2), ivec2( 0, -2), ivec2( 1, -2),
+    ivec2(-2, -1), ivec2(-1, -1), ivec2( 0, -1), ivec2( 1, -1), ivec2( 2, -1),
+    ivec2(-2,  0), ivec2(-1,  0), ivec2( 1,  0), ivec2( 2,  0),
+    ivec2(-1,  1), ivec2( 0,  1), ivec2( 1,  1),
+    ivec2( 0,  2)
+);
+
+// compute LBSP descriptor for a pixel using global memory reads
+uint compute_lbsp_global(int x, int y, uint center_luma)
+{
+    uint desc = 0u;
+    int lbsp_thresh = pc.desc_threshold * 4; // internal LBSP threshold
+
+    for (int i = 0; i < 16; i++)
+    {
+        int nx = clamp(x + lbsp_offsets[i].x, 0, pc.width - 1);
+        int ny = clamp(y + lbsp_offsets[i].y, 0, pc.height - 1);
+        int n_byte = (ny * pc.width + nx) * pc.num_channels;
+        uint n_luma = compute_luma(n_byte);
+
+        int diff = int(center_luma) - int(n_luma);
+        if (diff < 0) diff = -diff;
+        if (diff <= lbsp_thresh)
+            desc |= (1u << uint(i));
+    }
+    return desc;
+}
+
+void main()
+{
+    int x = int(gl_GlobalInvocationID.x);
+    int y = int(gl_GlobalInvocationID.y);
+    if (x >= pc.width || y >= pc.height) return;
+
+    int pixel = y * pc.width + x;
+    uint seed = pcg_hash(uint(pixel) ^ (pc.frame_number * 1337u));
+
+    // read current pixel color
+    int base = pixel * pc.num_channels;
+    uint color[3];
+    for (int c = 0; c < pc.num_channels; c++)
+        color[c] = read_input_byte(base + c);
+
+    // compute luminance and LBSP for center pixel
+    uint center_luma = compute_luma(base);
+    uint center_desc = compute_lbsp_global(x, y, center_luma);
+
+    // elements per sample plane (color)
+    int color_plane = pc.width * pc.height * pc.num_channels;
+    // elements per sample plane (descriptors)
+    int desc_plane = pc.width * pc.height;
+
+    // fill all N background samples
+    for (int s = 0; s < pc.bg_samples; s++)
+    {
+        seed = pcg_hash(seed);
+        int bg_color_base = s * color_plane + pixel * pc.num_channels;
+
+        for (int c = 0; c < pc.num_channels; c++)
+        {
+            seed = pcg_hash(seed);
+            int noise = int(seed % 7u) - 3; // -3 to +3
+            uint val = uint(clamp(int(color[c]) + noise, 0, 255));
+            write_bg_byte(bg_color_base + c, val);
+        }
+
+        // store LBSP descriptor for this sample
+        int desc_idx = s * desc_plane + pixel;
+        write_bg_desc(desc_idx, center_desc);
+    }
+}
