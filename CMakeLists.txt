@@ -17,12 +17,23 @@ include(CompilerWarnings)   # spc_set_warnings
 # local find-modules: RTL-SDR header locator (FindRtlSdr) + downloader (RtlSdr)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/plugins/cmake")
 
-# all built plugins land in build/plugins/ — copy these into Speculor's plugins/
-set(SPC_PLUGIN_OUTPUT_DIR ${CMAKE_BINARY_DIR}/plugins)
+# Built plugins land in build/plugins/ by default; the full build overrides this
+# (-DSPC_PLUGIN_OUTPUT_DIR) to route them into the app's shared bin/plugins tree.
+if(NOT DEFINED SPC_PLUGIN_OUTPUT_DIR)
+    set(SPC_PLUGIN_OUTPUT_DIR ${CMAKE_BINARY_DIR}/plugins)
+endif()
 
 # LITIV-derived CPU background-subtraction sources, compiled into the BGS plugins.
 # The shared CoreBgs base + OpenCV come from spclib; see common/bgs and each plugin.
 set(SPC_OSS_COMMON_DIR ${CMAKE_SOURCE_DIR}/common)
+
+# All open-source plugins ship together in a single "oss" bundle (their own domain
+# in the as-shipped plugins/ layout). spc_add_plugin reads SPC_PLUGIN_BUNDLE_<name>
+# to route each plugin DLL into <SPC_PLUGIN_OUTPUT_DIR>/oss/. Keep this in sync with
+# scripts/bundles.yaml.
+foreach(_oss_plugin vibe_bgs subsense_bgs rtl_sdr)
+    set(SPC_PLUGIN_BUNDLE_${_oss_plugin} "oss")
+endforeach()
 
 add_subdirectory(plugins/vibe_bgs)
 add_subdirectory(plugins/subsense_bgs)

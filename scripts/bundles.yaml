@@ -1,0 +1,25 @@
+version: 0.1.0
+
+defaults:
+  formats: [zip]
+  archive_prefix: speculor-bundle
+
+# The open-source plugins ship as a single "oss" bundle. This mirrors the structure
+# of speculor-plugins/scripts/bundles.yaml and is consumed by that repo's
+# build_bundles.py (pointed here via --manifest, which derives the repo root from
+# the manifest path) for both --deploy and archive modes. Keep the plugin→bundle
+# routing in sync with the SPC_PLUGIN_BUNDLE_* assignments in CMakeLists.txt.
+
+bundles:
+
+  oss:
+    sources: [plugins]
+    vendor:
+      # rtl_sdr loads librtlsdr at runtime. RtlSdr.cmake downloads rtlsdr.dll into
+      # the build's bin/ on Windows; stage it into the bundle's vendor/ so the
+      # loader finds it on the plugin's DLL search path. POSIX users install
+      # librtlsdr from their package manager, so there's nothing to vendor there.
+      - from: bin/rtlsdr.dll
+        if_present: true
+      - from: bin/ftd2xx.dll        # RTL-SDR FTDI USB backend (optional)
+        if_present: true
