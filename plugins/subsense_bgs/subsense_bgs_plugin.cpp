@@ -6,6 +6,7 @@
 
 #include <opencv2/core.hpp>
 
+#include <atomic>
 #include <memory>
 
 #ifdef SPC_HAS_VULKAN
@@ -16,6 +17,19 @@
 #include "subsense_gpu_pipeline.h"
 #endif
 
+// GUI-thread-set parameters, snapshotted on the worker (H6). The SuBSENSE
+// detector is worker-owned: CPU process() applies the snapshot on a dirty
+// flag; record_gpu reads the snapshot directly.
+struct Params
+{
+    int32_t bg_samples = 50;
+    int32_t required_matches = 2;
+    float initial_color_threshold = 30.0f;
+    int32_t initial_desc_threshold = 3;
+    float learning_rate_lower = 0.01f;
+    float learning_rate_upper = 0.1f;
+};
+
 // internal state
 struct SubsenseBgsState
 {
@@ -25,13 +39,9 @@ struct SubsenseBgsState
     cv::Mat fg_mask;
     SpcFrame output_frame;
 
-    // cached params
-    int32_t bg_samples;
-    int32_t required_matches;
-    float initial_color_threshold;
-    int32_t initial_desc_threshold;
-    float learning_rate_lower;
-    float learning_rate_upper;
+    // cross-thread parameter block (GUI writes, worker snapshots per frame)
+    spc::SharedParams<Params> params;
+    std::atomic<bool> params_dirty{false};
     // cached detection mask
     cv::Mat cached_mask;
     cv::Mat empty_mask;
@@ -80,15 +90,22 @@ SPC_PLUGIN_DESCRIPTOR(
 
 // --- lifecycle ---
 
+// apply a parameter snapshot to the worker-owned SuBSENSE detector (worker thread)
+static void apply_params(SubsenseBgsState* s, const Params& p)
+{
+    if (!s->subsense) return;
+    auto& sp = s->subsense->get_parameters();
+    sp.set_bg_samples(p.bg_samples);
+    sp.set_required_matches(p.required_matches);
+    sp.set_initial_color_threshold(p.initial_color_threshold);
+    sp.set_initial_desc_threshold(p.initial_desc_threshold);
+    sp.set_learning_rate_lower(p.learning_rate_lower);
+    sp.set_learning_rate_upper(p.learning_rate_upper);
+}
+
 static SpcPluginInstance* create_instance()
 {
     auto* s = new SubsenseBgsState{};
-    s->bg_samples = 50;
-    s->required_matches = 2;
-    s->initial_color_threshold = 30.0f;
-    s->initial_desc_threshold = 3;
-    s->learning_rate_lower = 0.01f;
-    s->learning_rate_upper = 0.1f;
     std::memset(&s->output_frame, 0, sizeof(SpcFrame));
     s->has_cached_mask = false;
     s->subsense = std::make_unique<spclib::bgs::SuBSENSE>(spclib::bgs::SuBSENSEParams());
@@ -153,55 +170,30 @@ static bool try_init_gpu(SubsenseBgsState* s)
 static int set_parameter(SpcPluginInstance* inst, const char* name, const SpcParameterDesc* value)
 {
     auto* s = state(inst);
-    if (!s->subsense) return -1;
-
-    if (spc::try_set_int(name, value, "bg_samples", s->bg_samples))
-    {
-        s->subsense->get_parameters().set_bg_samples(s->bg_samples);
-#ifdef SPC_HAS_VULKAN
-        // force GPU model re-init on sample count change
-        if (s->gpu_pipeline)
-        {
-            // prepare() will detect the parameter change and re-allocate
-        }
-#endif
-    }
-    else if (spc::try_set_int(name, value, "required_matches", s->required_matches))
-    {
-        s->subsense->get_parameters().set_required_matches(s->required_matches);
-    }
-    else if (spc::try_set_float(name, value, "initial_color_threshold", s->initial_color_threshold))
-    {
-        s->subsense->get_parameters().set_initial_color_threshold(s->initial_color_threshold);
-    }
-    else if (spc::try_set_int(name, value, "initial_desc_threshold", s->initial_desc_threshold))
-    {
-        s->subsense->get_parameters().set_initial_desc_threshold(s->initial_desc_threshold);
-    }
-    else if (spc::try_set_float(name, value, "learning_rate_lower", s->learning_rate_lower))
-    {
-        s->subsense->get_parameters().set_learning_rate_lower(s->learning_rate_lower);
-    }
-    else if (spc::try_set_float(name, value, "learning_rate_upper", s->learning_rate_upper))
-    {
-        s->subsense->get_parameters().set_learning_rate_upper(s->learning_rate_upper);
-    }
-    else
-    {
-        return -1;
-    }
-    return 0;
+    // Mutate the shared block only; the worker applies it to the detector on
+    // the dirty flag (CPU) / reads the snapshot directly (GPU).
+    bool matched = s->params.update([&](Params& p) {
+        return spc::try_set_int(name, value, "bg_samples", p.bg_samples)
+            || spc::try_set_int(name, value, "required_matches", p.required_matches)
+            || spc::try_set_float(name, value, "initial_color_threshold", p.initial_color_threshold)
+            || spc::try_set_int(name, value, "initial_desc_threshold", p.initial_desc_threshold)
+            || spc::try_set_float(name, value, "learning_rate_lower", p.learning_rate_lower)
+            || spc::try_set_float(name, value, "learning_rate_upper", p.learning_rate_upper);
+    });
+    if (matched) s->params_dirty.store(true, std::memory_order_release);
+    return matched ? 0 : -1;
 }
 
 static int get_parameter(SpcPluginInstance* inst, const char* name, SpcParameterDesc* out)
 {
     auto* s = state(inst);
-    if (spc::try_get_int(name, out, "bg_samples", s->bg_samples)) return 0;
-    if (spc::try_get_int(name, out, "required_matches", s->required_matches)) return 0;
-    if (spc::try_get_float(name, out, "initial_color_threshold", s->initial_color_threshold)) return 0;
-    if (spc::try_get_int(name, out, "initial_desc_threshold", s->initial_desc_threshold)) return 0;
-    if (spc::try_get_float(name, out, "learning_rate_lower", s->learning_rate_lower)) return 0;
-    if (spc::try_get_float(name, out, "learning_rate_upper", s->learning_rate_upper)) return 0;
+    const Params p = s->params.snapshot();
+    if (spc::try_get_int(name, out, "bg_samples", p.bg_samples)) return 0;
+    if (spc::try_get_int(name, out, "required_matches", p.required_matches)) return 0;
+    if (spc::try_get_float(name, out, "initial_color_threshold", p.initial_color_threshold)) return 0;
+    if (spc::try_get_int(name, out, "initial_desc_threshold", p.initial_desc_threshold)) return 0;
+    if (spc::try_get_float(name, out, "learning_rate_lower", p.learning_rate_lower)) return 0;
+    if (spc::try_get_float(name, out, "learning_rate_upper", p.learning_rate_upper)) return 0;
     return -1;
 }
 
@@ -214,6 +206,8 @@ static int start(SpcPluginInstance* inst)
     if (s->subsense)
     {
         s->subsense->restart();
+        apply_params(s, s->params.snapshot());  // sync detector to current params
+        s->params_dirty.store(false, std::memory_order_release);
     }
     s->cached_mask = cv::Mat();
     s->has_cached_mask = false;
@@ -263,6 +257,10 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t inpu
 
     if (input_count < 1 || output_count < 2) return -1;
     if (inputs[0].type != SPC_DATA_FRAME || !inputs[0].frame) return -1;
+
+    // apply any GUI-thread parameter change to the worker-owned detector
+    if (s->params_dirty.exchange(false, std::memory_order_acquire))
+        apply_params(s, s->params.snapshot());
 
     const SpcFrame* in_frame = inputs[0].frame;
     int cv_type = spc::cv_type_for_format(in_frame->format);
@@ -342,6 +340,8 @@ static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
     if (rctx->inputs[0].type != SPC_DATA_FRAME || !rctx->inputs[0].frame) return -1;
     if (!s->gpu_available || !s->gpu_ctx || !s->gpu_pipeline) return -1;
 
+    const Params p = s->params.snapshot();  // one consistent view per frame
+
     const SpcFrame* in_frame = rctx->inputs[0].frame;
     int cv_type = spc::cv_type_for_format(in_frame->format);
     if (cv_type < 0) return -1;
@@ -369,7 +369,7 @@ static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
     default:                     num_channels = 1; break;
     }
 
-    if (!s->gpu_pipeline->prepare(*s->gpu_ctx, w, h, num_channels, s->bg_samples))
+    if (!s->gpu_pipeline->prepare(*s->gpu_ctx, w, h, num_channels, p.bg_samples))
         return -1;
 
     bool input_on_gpu = in_frame->gpu_handle != 0 &&
@@ -384,10 +384,10 @@ static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
     pc.width = static_cast<int32_t>(w);
     pc.height = static_cast<int32_t>(h);
     pc.num_channels = num_channels;
-    pc.bg_samples = s->bg_samples;
-    pc.color_threshold = static_cast<int32_t>(s->initial_color_threshold);
-    pc.desc_threshold = s->initial_desc_threshold;
-    pc.required_matches = s->required_matches;
+    pc.bg_samples = p.bg_samples;
+    pc.color_threshold = static_cast<int32_t>(p.initial_color_threshold);
+    pc.desc_threshold = p.initial_desc_threshold;
+    pc.required_matches = p.required_matches;
     pc.learning_rate = 16;
     pc.frame_number = s->gpu_frame_counter++;
     pc.has_mask = s->has_cached_mask ? 1 : 0;

@@ -5,6 +5,7 @@
 #include <bgs/vibe/Vibe.hpp>
 #include <opencv2/core.hpp>
 
+#include <atomic>
 #include <memory>
 
 #ifdef SPC_HAS_VULKAN
@@ -15,6 +16,18 @@
 #include "vibe_gpu_pipeline.h"
 #endif
 
+// GUI-thread-set parameters, snapshotted on the worker (H6). The ViBe detector
+// is worker-owned — its setters must run on the worker from a snapshot, not
+// from set_parameter, so the CPU process() applies the snapshot on a dirty flag
+// and record_gpu reads the snapshot directly.
+struct Params
+{
+    int32_t threshold = 50;
+    int32_t bg_samples = 16;
+    int32_t required_bg_samples = 1;
+    int32_t learning_rate = 2;
+};
+
 // internal state
 struct VibeBgsState
 {
@@ -24,11 +37,9 @@ struct VibeBgsState
     cv::Mat fg_mask;
     SpcFrame output_frame;
 
-    // cached params
-    int32_t threshold;
-    int32_t bg_samples;
-    int32_t required_bg_samples;
-    int32_t learning_rate;
+    // cross-thread parameter block (GUI writes, worker snapshots per frame)
+    spc::SharedParams<Params> params;
+    std::atomic<bool> params_dirty{false};
     // cached detection mask
     cv::Mat cached_mask;
     cv::Mat empty_mask;
@@ -75,15 +86,22 @@ SPC_PLUGIN_DESCRIPTOR(
 
 // --- lifecycle ---
 
+// apply a parameter snapshot to the worker-owned ViBe detector (worker thread)
+static void apply_params(VibeBgsState* s, const Params& p)
+{
+    if (!s->vibe) return;
+    auto& vp = s->vibe->get_parameters();
+    vp.set_threshold(static_cast<uint32_t>(p.threshold));
+    vp.set_bg_samples(static_cast<uint32_t>(p.bg_samples));
+    vp.set_required_bg_samples(static_cast<uint32_t>(p.required_bg_samples));
+    vp.set_learning_rate(static_cast<uint32_t>(p.learning_rate));
+}
+
 static SpcPluginInstance* create_instance()
 {
     auto* s = new VibeBgsState{};
-    // Must match descriptor defaults — engine validates and pushes descriptor
-    // value into state on mismatch (logs a "drifted from descriptor" warning).
-    s->threshold = 50;
-    s->bg_samples = 16;
-    s->required_bg_samples = 1;
-    s->learning_rate = 2;
+    // Params defaults match the descriptor; the engine validates via
+    // get_parameter and pushes descriptor values on mismatch.
     std::memset(&s->output_frame, 0, sizeof(SpcFrame));
     s->has_cached_mask = false;
     s->vibe = std::make_unique<spclib::bgs::Vibe>(spclib::bgs::VibeParams(), false);
@@ -151,41 +169,26 @@ static bool try_init_gpu(VibeBgsState* s)
 static int set_parameter(SpcPluginInstance* inst, const char* name, const SpcParameterDesc* value)
 {
     auto* s = state(inst);
-    if (!s->vibe) return -1;
-
-    if (spc::try_set_int(name, value, "threshold", s->threshold))
-    {
-        s->vibe->get_parameters().set_threshold(static_cast<uint32_t>(s->threshold));
-    }
-    else if (spc::try_set_int(name, value, "bg_samples", s->bg_samples))
-    {
-        s->vibe->get_parameters().set_bg_samples(static_cast<uint32_t>(s->bg_samples));
-#ifdef SPC_HAS_VULKAN
-        s->gpu_model_initialized = false; // force re-init on sample count change
-#endif
-    }
-    else if (spc::try_set_int(name, value, "required_bg_samples", s->required_bg_samples))
-    {
-        s->vibe->get_parameters().set_required_bg_samples(static_cast<uint32_t>(s->required_bg_samples));
-    }
-    else if (spc::try_set_int(name, value, "learning_rate", s->learning_rate))
-    {
-        s->vibe->get_parameters().set_learning_rate(static_cast<uint32_t>(s->learning_rate));
-    }
-    else
-    {
-        return -1;
-    }
-    return 0;
+    // Mutate the shared block only; the worker applies it to the detector on
+    // the dirty flag (CPU) / reads the snapshot directly (GPU).
+    bool matched = s->params.update([&](Params& p) {
+        return spc::try_set_int(name, value, "threshold", p.threshold)
+            || spc::try_set_int(name, value, "bg_samples", p.bg_samples)
+            || spc::try_set_int(name, value, "required_bg_samples", p.required_bg_samples)
+            || spc::try_set_int(name, value, "learning_rate", p.learning_rate);
+    });
+    if (matched) s->params_dirty.store(true, std::memory_order_release);
+    return matched ? 0 : -1;
 }
 
 static int get_parameter(SpcPluginInstance* inst, const char* name, SpcParameterDesc* out)
 {
     auto* s = state(inst);
-    if (spc::try_get_int(name, out, "threshold", s->threshold)) return 0;
-    if (spc::try_get_int(name, out, "bg_samples", s->bg_samples)) return 0;
-    if (spc::try_get_int(name, out, "required_bg_samples", s->required_bg_samples)) return 0;
-    if (spc::try_get_int(name, out, "learning_rate", s->learning_rate)) return 0;
+    const Params p = s->params.snapshot();
+    if (spc::try_get_int(name, out, "threshold", p.threshold)) return 0;
+    if (spc::try_get_int(name, out, "bg_samples", p.bg_samples)) return 0;
+    if (spc::try_get_int(name, out, "required_bg_samples", p.required_bg_samples)) return 0;
+    if (spc::try_get_int(name, out, "learning_rate", p.learning_rate)) return 0;
     return -1;
 }
 
@@ -198,6 +201,8 @@ static int start(SpcPluginInstance* inst)
     if (s->vibe)
     {
         s->vibe->restart();
+        apply_params(s, s->params.snapshot());  // sync detector to current params
+        s->params_dirty.store(false, std::memory_order_release);
     }
     s->cached_mask = cv::Mat();
     s->has_cached_mask = false;
@@ -248,6 +253,10 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t inpu
 
     if (input_count < 1 || output_count < 2) return -1;
     if (inputs[0].type != SPC_DATA_FRAME || !inputs[0].frame) return -1;
+
+    // apply any GUI-thread parameter change to the worker-owned detector
+    if (s->params_dirty.exchange(false, std::memory_order_acquire))
+        apply_params(s, s->params.snapshot());
 
     const SpcFrame* in_frame = inputs[0].frame;
     int cv_type = spc::cv_type_for_format(in_frame->format);
@@ -335,6 +344,8 @@ static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
     if (rctx->inputs[0].type != SPC_DATA_FRAME || !rctx->inputs[0].frame) return -1;
     if (!s->gpu_available || !s->gpu_ctx || !s->gpu_pipeline) return -1;
 
+    const Params p = s->params.snapshot();  // one consistent view per frame
+
     const SpcFrame* in_frame = rctx->inputs[0].frame;
     int cv_type = spc::cv_type_for_format(in_frame->format);
     if (cv_type < 0) return -1;
@@ -370,7 +381,7 @@ static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
         num_channels = 1; bytes_per_channel = 1; break;
     }
 
-    if (!s->gpu_pipeline->prepare(*s->gpu_ctx, w, h, num_channels, bytes_per_channel, s->bg_samples))
+    if (!s->gpu_pipeline->prepare(*s->gpu_ctx, w, h, num_channels, bytes_per_channel, p.bg_samples))
         return -1;
 
     uint32_t frame_size = w * h * static_cast<uint32_t>(num_channels) *
@@ -389,15 +400,15 @@ static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
     pc.width = static_cast<int32_t>(w);
     pc.height = static_cast<int32_t>(h);
     pc.num_channels = num_channels;
-    pc.bg_samples = s->bg_samples;
-    pc.threshold = (bytes_per_channel == 2) ? s->threshold * 256 : s->threshold;
-    pc.required_bg_samples = s->required_bg_samples;
+    pc.bg_samples = p.bg_samples;
+    pc.threshold = (bytes_per_channel == 2) ? p.threshold * 256 : p.threshold;
+    pc.required_bg_samples = p.required_bg_samples;
     auto power_of_2 = [](uint32_t v) -> uint32_t {
         v |= v >> 1; v |= v >> 2; v |= v >> 4; v |= v >> 8; v |= v >> 16;
         return v - (v >> 1);
     };
-    uint32_t bg_p2 = power_of_2(static_cast<uint32_t>(s->bg_samples));
-    uint32_t lr_p2 = power_of_2(static_cast<uint32_t>(s->learning_rate));
+    uint32_t bg_p2 = power_of_2(static_cast<uint32_t>(p.bg_samples));
+    uint32_t lr_p2 = power_of_2(static_cast<uint32_t>(p.learning_rate));
     pc.bg_samples_and = static_cast<int32_t>(bg_p2 > 1 ? bg_p2 - 1 : 1);
     pc.learning_rate_and = static_cast<int32_t>(lr_p2 > 1 ? lr_p2 - 1 : 0);
     pc.bg_samples = static_cast<int32_t>(bg_p2 > 1 ? bg_p2 : 2);
