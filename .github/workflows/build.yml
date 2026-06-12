@@ -46,6 +46,12 @@ jobs:
           else
             tar -xzf sdk/*.tar.gz -C sdk/x
           fi
+          # Normalize extracted mtimes to "now". The SDK Windows .zip is built on a
+          # UTC+2 self-hosted box and stores LOCAL timestamps (no timezone), so on a
+          # UTC runner the files look ~2h in the future, which makes CMake/ninja's
+          # restat loop forever ("build.ninja still dirty ... perhaps system time is
+          # not set"). The Linux .tar.gz uses UTC mtimes and is unaffected.
+          find sdk/x -exec touch {} +
           cfg=$(find "$PWD/sdk/x" -name SpeculorSDKConfig.cmake | head -1)
           if [ -z "$cfg" ]; then echo "::error::SpeculorSDKConfig.cmake not found in bundle"; exit 1; fi
           root="${cfg%/lib/cmake/SpeculorSDK/SpeculorSDKConfig.cmake}"
