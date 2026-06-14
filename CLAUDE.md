@@ -9,6 +9,7 @@
   third-party-derived or copyleft-linked addition needs a `plugins/<name>/LICENSE`
   and a `THIRD_PARTY_NOTICES.md` entry. Putting code in a public repo does **not**
   by itself make bundling copyleft (e.g. GPL) code safe — that needs separate review.
+  - **Comments**: Add a comment only when it explains something the code itself cannot show — a non-obvious *why*, an invariant, or a gotcha. Don't restate what the code already says, and never narrate changes, fixes, or history in comments — that belongs in the git commit message.   
 
 ## What this repo is
 
