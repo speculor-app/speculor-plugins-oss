@@ -67,7 +67,7 @@ inline void set_iq_metadata(SpcTable& table,
                             double sample_rate_hz, double center_freq_hz,
                             double bandwidth_hz, double gain_db,
                             bool agc_on, int bit_depth,
-                            uint64_t frame_number, int64_t timestamp_us)
+                            uint64_t frame_number, int64_t timestamp_ns)
 {
     table.sample_rate_hz = sample_rate_hz;
     table.center_freq_hz = center_freq_hz;
@@ -76,7 +76,7 @@ inline void set_iq_metadata(SpcTable& table,
     table.agc_enabled = agc_on ? 1 : 0;
     table.bit_depth = bit_depth;
     table.frame_number = frame_number;
-    table.timestamp_us = timestamp_us;
+    table.timestamp_ns = timestamp_ns;
 }
 
 // device registry entry for enum parameter population

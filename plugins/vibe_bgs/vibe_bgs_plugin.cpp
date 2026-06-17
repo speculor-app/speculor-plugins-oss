@@ -297,7 +297,7 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t inpu
         s->vibe->apply(s->input_image, s->fg_mask,
                        s->has_cached_mask ? s->cached_mask : s->empty_mask);
         out->frame_number = in_frame->frame_number;
-        out->timestamp_us = in_frame->timestamp_us;
+        out->timestamp_ns = in_frame->timestamp_ns;
         outputs[0].type = SPC_DATA_FRAME;
         outputs[0].frame = out;
         outputs[1].type = SPC_DATA_FRAME;
@@ -310,7 +310,7 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t inpu
                    s->has_cached_mask ? s->cached_mask : s->empty_mask);
     const cv::Mat& fg_mat = s->fg_mask;
     spc::mat_to_frame(fg_mat, &s->output_frame, SPC_PIXEL_FORMAT_GRAY8,
-                     in_frame->frame_number, in_frame->timestamp_us);
+                     in_frame->frame_number, in_frame->timestamp_ns);
     outputs[0].type = SPC_DATA_FRAME;
     outputs[0].frame = &s->output_frame;
     outputs[1].type = SPC_DATA_FRAME;
@@ -429,7 +429,7 @@ static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
         if (out) {
             std::memset(out->data, 0, static_cast<size_t>(out->stride) * h);
             out->frame_number = in_frame->frame_number;
-            out->timestamp_us = in_frame->timestamp_us;
+            out->timestamp_ns = in_frame->timestamp_ns;
             rctx->outputs[0].type = SPC_DATA_FRAME;
             rctx->outputs[0].frame = out;
         }
@@ -465,7 +465,7 @@ static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
                                  s->gpu_pipeline->staging_output_mapped(),
                                  &s->gpu_pipeline->output_staging());
     out->frame_number = in_frame->frame_number;
-    out->timestamp_us = in_frame->timestamp_us;
+    out->timestamp_ns = in_frame->timestamp_ns;
     rctx->outputs[0].type = SPC_DATA_FRAME;
     rctx->outputs[0].frame = out;
     rctx->outputs[1].type = SPC_DATA_FRAME;

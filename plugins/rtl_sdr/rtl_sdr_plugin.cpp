@@ -1,6 +1,7 @@
 #include "rtl_sdr_device.h"
 #include "winradio_common.h"
 #include <speculor/sdr_params.h>
+#include <spc_clock.h>
 
 #include <chrono>
 #include <cstring>
@@ -497,9 +498,7 @@ static int process(SpcPluginInstance* inst, const SpcData*, uint32_t,
     std::memcpy(s->output_table.data, s->batch_buffer.data(),
                 static_cast<size_t>(batch) * 4);
 
-    auto now = std::chrono::steady_clock::now();
-    auto ts = std::chrono::duration_cast<std::chrono::microseconds>(
-        now.time_since_epoch()).count();
+    auto ts = spc::clock::now_utc_ns(s->host);
 
     spc::winradio::set_iq_metadata(
         s->output_table,
