@@ -1,5 +1,13 @@
 # CLAUDE.md — Speculor Open-Source Plugins
 
+## Scope & Platform Constraints
+
+Speculor — and everything under it (`speculor-app`, `speculor-sdk`, `speculor-plugins`, `speculor-plugins-oss`) — is a **generic, multi-purpose pipeline engine for multi-sensor / multi-camera fusion**, not a single-machine tool. Design, optimize, and review accordingly:
+
+- **Must run on any hardware.** Performance has to hold across the whole range — low-end CPUs and integrated GPUs through high-end discrete GPUs, plus headless / edge boxes. **Never assume a powerful machine.** "It runs fine on the dev's box" is not the bar; the constrained low end and many-stream load are first-class targets.
+- **Many sensors at once.** The common deployment joins *many* concurrent cameras/sensors into one pipeline, so every per-stream cost is multiplied. Avoid redundant work, per-frame allocations, busy-waits, and contention on shared resources (GPU queues, VRAM, memory bandwidth, threads) — they all scale with sensor count.
+- **Optimize for the constrained case.** Weigh designs against the low-end / high-fan-in deployment, not the developer's high-end GPU. If a choice trades generality or low-end performance for peak-machine speed, surface the tradeoff rather than assuming the strong hardware.
+
 ## Workflow rules
 
 - **Never commit or push** unless the user explicitly asks.
