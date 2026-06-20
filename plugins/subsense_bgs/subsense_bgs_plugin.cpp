@@ -54,7 +54,6 @@ struct SubsenseBgsState
     bool gpu_init_attempted;
     bool gpu_available;
     uint32_t gpu_frame_counter;
-    spc::gpu::GpuOutputHandle gpu_output;
     spc::gpu::GpuFailureTracker gpu_failure{"SuBSENSE"};
 #endif
 };
@@ -121,8 +120,6 @@ static void destroy_instance(SpcPluginInstance* inst)
 {
     auto* s = state(inst);
 #ifdef SPC_HAS_VULKAN
-    if (s->gpu_ctx)
-        s->gpu_output.release(s->gpu_ctx.get());
     if (s->gpu_pipeline && s->gpu_ctx)
         s->gpu_pipeline->destroy(*s->gpu_ctx);
     s->gpu_pipeline.reset();
@@ -228,11 +225,8 @@ static int stop(SpcPluginInstance* inst)
 {
     auto* s = state(inst);
 #ifdef SPC_HAS_VULKAN
-    if (s->gpu_ctx) {
-        s->gpu_output.release(s->gpu_ctx.get());
-        if (s->gpu_pipeline)
-            s->gpu_pipeline->destroy(*s->gpu_ctx);
-    }
+    if (s->gpu_ctx && s->gpu_pipeline)
+        s->gpu_pipeline->destroy(*s->gpu_ctx);
     s->gpu_pipeline.reset();
     s->gpu_ctx.reset();
     s->gpu_init_attempted = false;
@@ -332,6 +326,42 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t inpu
 // coalesced secondary and read uninitialized memory from upstream.
 
 #ifdef SPC_HAS_VULKAN
+// Acquire the engine-owned K-deep INPUT upload ring slot for this frame and
+// memcpy the CPU frame into its staging. Only used when the upstream input is
+// NOT already GPU-resident (gpu_input == NULL). SuBSENSE is 8-bit only (1
+// byte/channel). Returns false if the host has no edge-ring service or the
+// allocation failed (caller demotes to CPU).
+static bool acquire_input_upload(SubsenseBgsState* s, SpcGpuRecordCtx* rctx,
+                                 const SpcFrame* in_frame, int num_channels,
+                                 VkBuffer& in_device, VkBuffer& in_staging)
+{
+    in_device = VK_NULL_HANDLE;
+    in_staging = VK_NULL_HANDLE;
+    if (!rctx->edge_ring_ctx) return false;
+    const uint32_t w = static_cast<uint32_t>(in_frame->width);
+    const uint32_t h = static_cast<uint32_t>(in_frame->height);
+    const int row_bytes = static_cast<int>(w) * num_channels;
+    // device + staging are sized input_device_size() (the padded frame_bytes_
+    // the pipeline's cmd_upload_input copies); only the real row_bytes*h bytes
+    // are memcpy'd in. Sizing staging at the unpadded frame size would overrun
+    // on the padded device copy.
+    const uint64_t ring_bytes = static_cast<uint64_t>(s->gpu_pipeline->input_device_size());
+    SpcGpuEdgeBuffer up = s->host.acquire_ringed_upload(
+        rctx->edge_ring_ctx, 0, ring_bytes, ring_bytes);
+    if (!up.device_buffer || !up.staging_buffer || !up.staging_mapped) return false;
+    auto* dst = static_cast<uint8_t*>(up.staging_mapped);
+    const auto* src = in_frame->data;
+    const int stride = static_cast<int>(in_frame->stride);
+    if (stride == row_bytes)
+        std::memcpy(dst, src, static_cast<size_t>(row_bytes) * h);
+    else
+        for (uint32_t y = 0; y < h; ++y)
+            std::memcpy(dst + y * row_bytes, src + y * stride, row_bytes);
+    in_device  = static_cast<VkBuffer>(up.device_buffer);
+    in_staging = static_cast<VkBuffer>(up.staging_buffer);
+    return true;
+}
+
 static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
 {
     auto* s = state(inst);
@@ -393,39 +423,57 @@ static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
     pc.has_mask = s->has_cached_mask ? 1 : 0;
     pc.width4 = (static_cast<int32_t>(w) + 3) / 4;
 
-    // First-frame model init: record into the engine secondary so the read
-    // of gpu_input is properly ordered after upstream writes. A plugin-
-    // private submit_and_wait here would race the engine's not-yet-
-    // submitted coalesced secondary and seed the background model from
-    // uninitialized GPU memory.
-    if (!s->gpu_pipeline->model_ready()) {
-        auto init_cmd = static_cast<VkCommandBuffer>(rctx->cmd_buffer_handle);
-        if (!init_cmd) return -1;
-        if (!s->gpu_pipeline->record_init(*s->gpu_ctx, init_cmd,
-                                          in_frame->data,
-                                          static_cast<int>(in_frame->stride),
-                                          pc, gpu_input_buf))
-            return -1;
-        SpcFrame* out = s->host.acquire_frame(0, w, h, SPC_PIXEL_FORMAT_GRAY8);
-        if (out) {
-            std::memset(out->data, 0, static_cast<size_t>(out->stride) * h);
-            out->frame_number = in_frame->frame_number;
-            out->timestamp_ns = in_frame->timestamp_ns;
-            rctx->outputs[0].type = SPC_DATA_FRAME;
-            rctx->outputs[0].frame = out;
-        }
-        rctx->outputs[1].type = SPC_DATA_FRAME;
-        rctx->outputs[1].frame = const_cast<SpcFrame*>(in_frame);
-        return 0;
-    }
+    auto cmd = static_cast<VkCommandBuffer>(rctx->cmd_buffer_handle);
+    if (!cmd) return -1;
 
     SpcFrame* out = s->host.acquire_frame(0, w, h, SPC_PIXEL_FORMAT_GRAY8);
     if (!out) return -1;
 
-    auto cmd = static_cast<VkCommandBuffer>(rctx->cmd_buffer_handle);
-    if (!cmd) {
+    // Acquire the engine-owned OUTPUT ring slot for this frame (binding 4 +
+    // download dst). The engine registers the slot's buffer + staging against
+    // the returned gpu_handle, so the post-submit invalidate covers it and
+    // downstream consumers resolve it by handle. Acquired for the init frame
+    // too so the init dispatch's binding 4 is a valid buffer.
+    if (!rctx->edge_ring_ctx) { s->host.release_frame(out); return -1; }
+    SpcGpuEdgeBuffer outbuf = s->host.acquire_ringed_output(
+        rctx->edge_ring_ctx, 0, w, h, out->stride, SPC_PIXEL_FORMAT_GRAY8,
+        static_cast<uint64_t>(s->gpu_pipeline->output_device_size()),
+        static_cast<uint64_t>(s->gpu_pipeline->output_staging_size()));
+    if (!outbuf.device_buffer || !outbuf.staging_buffer || outbuf.gpu_handle == 0) {
         s->host.release_frame(out);
         return -1;
+    }
+
+    // CPU-fed input → acquire the upload ring slot + memcpy the frame in.
+    // GPU-resident input → device-to-device, no upload ring.
+    VkBuffer in_device = VK_NULL_HANDLE, in_staging = VK_NULL_HANDLE;
+    if (gpu_input_buf == VK_NULL_HANDLE &&
+        !acquire_input_upload(s, rctx, in_frame, num_channels, in_device, in_staging)) {
+        s->host.release_frame(out);
+        return -1;
+    }
+
+    // First-frame model init: record into the engine secondary so the read of
+    // gpu_input is properly ordered after upstream writes. First frame's mask
+    // is conventionally all-zero — emit a CPU zero mask (NOT GPU-resident) +
+    // passthrough; the output ring slot was acquired only to keep binding 4
+    // valid.
+    if (!s->gpu_pipeline->model_ready()) {
+        if (!s->gpu_pipeline->record_init(*s->gpu_ctx, cmd,
+                                          in_device, in_staging,
+                                          static_cast<VkBuffer>(outbuf.device_buffer),
+                                          pc, gpu_input_buf)) {
+            s->host.release_frame(out);
+            return -1;
+        }
+        std::memset(out->data, 0, static_cast<size_t>(out->stride) * h);
+        out->frame_number = in_frame->frame_number;
+        out->timestamp_ns = in_frame->timestamp_ns;
+        rctx->outputs[0].type = SPC_DATA_FRAME;
+        rctx->outputs[0].frame = out;
+        rctx->outputs[1].type = SPC_DATA_FRAME;
+        rctx->outputs[1].frame = const_cast<SpcFrame*>(in_frame);
+        return 0;
     }
 
     const uint8_t* mask_ptr = nullptr;
@@ -436,19 +484,19 @@ static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
     }
 
     if (!s->gpu_pipeline->record(*s->gpu_ctx, cmd,
-                                  in_frame->data, static_cast<int>(in_frame->stride),
+                                  in_device, in_staging,
+                                  static_cast<VkBuffer>(outbuf.device_buffer),
+                                  static_cast<VkBuffer>(outbuf.staging_buffer),
                                   mask_ptr, mask_stride,
                                   pc, gpu_input_buf)) {
         s->host.release_frame(out);
         return -1;
     }
 
-    s->gpu_output.bind_to_frame(s->gpu_ctx, out, in_frame,
-                                 s->gpu_pipeline->packed_mask_buffer(),
-                                 s->gpu_pipeline->packed_mask_memory(),
-                                 s->gpu_pipeline->packed_mask_bytes(),
-                                 s->gpu_pipeline->staging_output_mapped(),
-                                 &s->gpu_pipeline->output_staging());
+    // Stamp the output frame as GPU-resident from the engine ring slot's
+    // handle (same fields GpuOutputHandle::bind_to_frame set on the prior path).
+    out->gpu_handle   = outbuf.gpu_handle;
+    out->gpu_flags   |= SPC_GPU_FLAG_RESIDENT;
     out->frame_number = in_frame->frame_number;
     out->timestamp_ns = in_frame->timestamp_ns;
     rctx->outputs[0].type = SPC_DATA_FRAME;
