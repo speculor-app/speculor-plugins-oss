@@ -90,14 +90,10 @@ bool VibeGpuPipeline::prepare(VulkanContext& ctx, uint32_t width, uint32_t heigh
     // wait for any in-flight work before destroying referenced resources
     wait_timeline_idle(ctx);
 
-    // free old buffers
-    spc::gpu::destroy_buffer(ctx, input_buf_, input_mem_);
+    // free old buffers (input upload + output are engine-owned now)
     spc::gpu::destroy_buffer(ctx, bg_model_buf_, bg_model_mem_);
-    spc::gpu::destroy_buffer(ctx, output_buf_, output_mem_);
     spc::gpu::destroy_buffer(ctx, detect_mask_buf_, detect_mask_mem_);
     spc::gpu::destroy_buffer(ctx, packed_mask_buf_, packed_mask_mem_);
-    staging_in_.destroy(ctx);
-    staging_out_.destroy(ctx);
     staging_mask_.destroy(ctx);
 
     width_ = width;
@@ -140,18 +136,15 @@ bool VibeGpuPipeline::prepare(VulkanContext& ctx, uint32_t width, uint32_t heigh
     output_buf_size_ = std::max(output_buf_size_, VkDeviceSize(4));
     staging_out_size_ = std::max(staging_out_size_, VkDeviceSize(4));
 
-    // device-local buffers
+    // device-local buffers (plugin-owned: bg_model + detect_mask + packed).
+    // The input upload buffer (binding 0) and output buffer (binding 2) are
+    // engine-owned ring slots, resolved per-frame in record()/record_init().
     auto device_usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                         VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                         VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
     auto device_mem = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
 
-    use_bar_input_ = false;
-    if (!spc::gpu::create_buffer(ctx, frame_byte_size_, device_usage, device_mem, input_buf_, input_mem_))
-    { width_ = 0; return false; }
     if (!spc::gpu::create_buffer(ctx, model_buf_size, device_usage, device_mem, bg_model_buf_, bg_model_mem_))
-    { width_ = 0; return false; }
-    if (!spc::gpu::create_buffer(ctx, output_buf_size_, device_usage, device_mem, output_buf_, output_mem_))
     { width_ = 0; return false; }
     if (!spc::gpu::create_buffer(ctx, mask_byte_size_, device_usage, device_mem, detect_mask_buf_, detect_mask_mem_))
     { width_ = 0; return false; }
@@ -161,88 +154,106 @@ bool VibeGpuPipeline::prepare(VulkanContext& ctx, uint32_t width, uint32_t heigh
                        device_mem, packed_mask_buf_, packed_mask_mem_))
     { width_ = 0; return false; }
 
-    // staging buffers (persistently mapped via StagingBuffer)
-    if (!staging_in_.allocate(ctx, frame_byte_size_, VK_BUFFER_USAGE_TRANSFER_SRC_BIT))
-    { width_ = 0; return false; }
-    if (!staging_out_.allocate(ctx, staging_out_size_, VK_BUFFER_USAGE_TRANSFER_DST_BIT))
-    { width_ = 0; return false; }
+    // staging buffer for the optional detect_mask (binding 3 upload source).
     if (!staging_mask_.allocate(ctx, mask_byte_size_, VK_BUFFER_USAGE_TRANSFER_SRC_BIT))
     { width_ = 0; return false; }
 
-    // populate push descriptor cache
-    push_bufs_[0] = input_buf_;     push_sizes_[0] = frame_byte_size_;
+    // populate push descriptor cache. Bindings 0 (input) and 2 (output) are
+    // engine ring slots re-pointed per frame; seed them null here.
+    push_bufs_[0] = VK_NULL_HANDLE; push_sizes_[0] = frame_byte_size_;
     push_bufs_[1] = bg_model_buf_;  push_sizes_[1] = model_buf_size;
-    push_bufs_[2] = output_buf_;    push_sizes_[2] = output_buf_size_;
+    push_bufs_[2] = VK_NULL_HANDLE; push_sizes_[2] = output_buf_size_;
     push_bufs_[3] = detect_mask_buf_; push_sizes_[3] = mask_byte_size_;
     push_bufs_[4] = packed_mask_buf_; push_sizes_[4] = mask_byte_size_;
 
+    // Non-push-descriptor path writes the stable bindings (1/3/4) once here;
+    // bindings 0/2 are written per-frame in record()/record_init().
     if (!ctx.has_push_descriptors)
     {
-        VkDescriptorBufferInfo buf_infos[5]{};
-        buf_infos[0] = {input_buf_, 0, frame_byte_size_};
-        buf_infos[1] = {bg_model_buf_, 0, model_buf_size};
-        buf_infos[2] = {output_buf_, 0, output_buf_size_};
-        buf_infos[3] = {detect_mask_buf_, 0, mask_byte_size_};
-        buf_infos[4] = {packed_mask_buf_, 0, mask_byte_size_};
+        VkDescriptorBufferInfo buf_infos[3]{};
+        buf_infos[0] = {bg_model_buf_, 0, model_buf_size};
+        buf_infos[1] = {detect_mask_buf_, 0, mask_byte_size_};
+        buf_infos[2] = {packed_mask_buf_, 0, mask_byte_size_};
+        const uint32_t bindings[3] = {1, 3, 4};
 
-        VkWriteDescriptorSet writes[5]{};
-        for (int i = 0; i < 5; ++i)
+        VkWriteDescriptorSet writes[3]{};
+        for (int i = 0; i < 3; ++i)
         {
             writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[i].dstSet = desc_set_;
-            writes[i].dstBinding = static_cast<uint32_t>(i);
+            writes[i].dstBinding = bindings[i];
             writes[i].descriptorCount = 1;
             writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             writes[i].pBufferInfo = &buf_infos[i];
         }
-        vkUpdateDescriptorSets(ctx.device, 5, writes, 0, nullptr);
+        vkUpdateDescriptorSets(ctx.device, 3, writes, 0, nullptr);
     }
 
     return true;
 }
 
-bool VibeGpuPipeline::run_init(VulkanContext& ctx,
-                                const uint8_t* frame_data, uint32_t frame_size,
-                                const VibePushConstants& params,
-                                VkBuffer gpu_input)
+// Re-point the per-frame ring bindings: 0 (input) and 2 (output). For the
+// push-descriptor path this just updates the cache the dispatch reads; for the
+// classic descriptor-set path it writes the set. `out` may be VK_NULL_HANDLE
+// for the init pass (which doesn't write the output binding) — only binding 0
+// is set in that case.
+void VibeGpuPipeline::set_ring_bindings(VulkanContext& ctx, VkBuffer in, VkBuffer out)
 {
-    if (gpu_input == VK_NULL_HANDLE)
-        std::memcpy(staging_in_.mapped, frame_data, frame_size);
+    push_bufs_[0] = in;
+    if (out != VK_NULL_HANDLE) push_bufs_[2] = out;
 
-    VkPipeline pipeline = use_wide_layout_ ? init_wide_pipeline_ : init_pipeline_;
-    VkShaderEXT shader = use_wide_layout_ ? init_wide_shader_ : init_shader_;
-
-    if (!begin_recording(ctx)) return false;
-    cmd_upload_input(staging_in_, input_buf_, frame_size, gpu_input);
-    barrier_transfer_to_compute();
-
-    cmd_dispatch_compute(ctx, pipeline, shader,
-                         pipeline_layout_, desc_set_,
-                         push_bufs_, push_sizes_, 5,
-                         params,
-                         (params.width + 15) / 16, (params.height + 15) / 16);
-
-    if (!submit_and_wait(ctx)) return false;
-
-    model_initialized_ = true;
-    return true;
+    if (!ctx.has_push_descriptors)
+    {
+        VkDescriptorBufferInfo infos[2]{};
+        VkWriteDescriptorSet writes[2]{};
+        uint32_t n = 0;
+        infos[n] = {in, 0, frame_byte_size_};
+        writes[n].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[n].dstSet = desc_set_; writes[n].dstBinding = 0;
+        writes[n].descriptorCount = 1;
+        writes[n].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        writes[n].pBufferInfo = &infos[n];
+        ++n;
+        if (out != VK_NULL_HANDLE) {
+            infos[n] = {out, 0, output_buf_size_};
+            writes[n].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[n].dstSet = desc_set_; writes[n].dstBinding = 2;
+            writes[n].descriptorCount = 1;
+            writes[n].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            writes[n].pBufferInfo = &infos[n];
+            ++n;
+        }
+        vkUpdateDescriptorSets(ctx.device, n, writes, 0, nullptr);
+    }
 }
 
 bool VibeGpuPipeline::record_init(VulkanContext& ctx, VkCommandBuffer cmd,
-                                   const uint8_t* frame_data, uint32_t frame_size,
+                                   VkBuffer in_device, VkBuffer in_staging,
+                                   uint32_t frame_size, VkBuffer out_device,
                                    const VibePushConstants& params,
                                    VkBuffer gpu_input)
 {
     if (!ctx.valid) return false;
-    if (gpu_input == VK_NULL_HANDLE) {
-        if (!frame_data) return false;
-        std::memcpy(staging_in_.mapped, frame_data, frame_size);
-    }
+    if (out_device == VK_NULL_HANDLE) return false;
+    // Input binding 0 = upstream GPU output (device-to-device) or the upload
+    // ring slot the plugin already filled. The init dispatch reads binding 0.
+    // Binding 2 (output) gets a valid buffer too so the descriptor set is fully
+    // bound even though the init shader doesn't write it.
+    VkBuffer in_buf = (gpu_input != VK_NULL_HANDLE) ? gpu_input : in_device;
+    if (in_buf == VK_NULL_HANDLE) return false;
+    set_ring_bindings(ctx, in_buf, out_device);
 
     ScopedExternalRecording scope(*this, cmd);
 
-    cmd_upload_input(staging_in_, input_buf_, frame_size, gpu_input);
-    barrier_transfer_to_compute();
+    // Upload only when CPU-fed (gpu_input == NULL): copy the upload ring
+    // slot's staging into its device buffer. The CPU memcpy into staging
+    // already happened in the plugin. When gpu_input != NULL the input is read
+    // directly from the upstream output (binding 0 set above) — no copy.
+    if (gpu_input == VK_NULL_HANDLE) {
+        StagingBuffer in_stg{}; in_stg.buffer = in_staging;
+        cmd_upload_input(in_stg, in_device, frame_size);
+        barrier_transfer_to_compute();
+    }
 
     VkPipeline pipeline = use_wide_layout_ ? init_wide_pipeline_ : init_pipeline_;
     VkShaderEXT shader  = use_wide_layout_ ? init_wide_shader_   : init_shader_;
@@ -257,31 +268,47 @@ bool VibeGpuPipeline::record_init(VulkanContext& ctx, VkCommandBuffer cmd,
 }
 
 bool VibeGpuPipeline::record(VulkanContext& ctx, VkCommandBuffer cmd,
-                              const uint8_t* frame_data, uint32_t frame_size,
+                              VkBuffer in_device, VkBuffer in_staging, uint32_t frame_size,
+                              VkBuffer out_device, VkBuffer out_staging,
                               const uint8_t* detect_mask, uint32_t mask_size,
                               const VibePushConstants& params,
                               VkBuffer gpu_input)
 {
-    if (!ctx.valid || !frame_data || !model_initialized_) return false;
+    if (!ctx.valid || !model_initialized_) return false;
+    if (out_device == VK_NULL_HANDLE || out_staging == VK_NULL_HANDLE) return false;
 
-    // Stage the input frame (only if upstream isn't already GPU-resident).
-    // Same CPU memcpy as run_process; the secondary cmd buffer the engine
-    // handed us doesn't change anything about staging — that's plain mapped
-    // memory.
-    if (gpu_input == VK_NULL_HANDLE)
-        std::memcpy(staging_in_.mapped, frame_data, frame_size);
+    // Input binding 0 = upstream GPU output (device-to-device) or the upload
+    // ring slot the plugin already memcpy'd the CPU frame into.
+    VkBuffer in_buf = (gpu_input != VK_NULL_HANDLE) ? gpu_input : in_device;
+    if (in_buf == VK_NULL_HANDLE) return false;
 
     bool has_mask = (detect_mask != nullptr && mask_size > 0);
     if (has_mask)
         std::memcpy(staging_mask_.mapped, detect_mask, mask_size);
 
+    // Re-point bindings 0 (input ring slot) and 2 (output ring slot) at this
+    // frame's buffers. At depth==1 these are the single slots, so this rewires
+    // the same buffers every frame (the engine's ensure_registered caches the
+    // output handle) — byte-identical to the prior single-buffer path. At
+    // depth>1 it routes this frame into slots distinct from in-flight frames'.
+    set_ring_bindings(ctx, in_buf, out_device);
+
     ScopedExternalRecording scope(*this, cmd);
 
-    // upload frame + optional mask
-    cmd_upload_input(staging_in_, input_buf_, frame_size, gpu_input);
-    if (has_mask)
+    // upload frame (only when CPU-fed; gpu_input is read directly) + optional
+    // mask. Barrier fires when either upload was recorded.
+    bool recorded_transfer = false;
+    if (gpu_input == VK_NULL_HANDLE) {
+        StagingBuffer in_stg{}; in_stg.buffer = in_staging;
+        cmd_upload_input(in_stg, in_device, frame_size);
+        recorded_transfer = true;
+    }
+    if (has_mask) {
         cmd_upload_input(staging_mask_, detect_mask_buf_, mask_size);
-    barrier_transfer_to_compute();
+        recorded_transfer = true;
+    }
+    if (recorded_transfer)
+        barrier_transfer_to_compute();
 
     // encode mask presence in frame_number high bit (matches run_process)
     VibePushConstants pc = params;
@@ -308,10 +335,14 @@ bool VibeGpuPipeline::record(VulkanContext& ctx, VkCommandBuffer cmd,
                              pc, pack_groups, 1);
     }
 
-    // readback to staging — engine handles the wait + invalidate via the registry.
-    VkBuffer out_buf = use_wide_layout_ ? packed_mask_buf_ : output_buf_;
+    // readback to the OUTPUT ring slot's staging — engine handles the wait +
+    // invalidate via the registry. Non-wide (active) path downloads the
+    // process shader's direct output (out_device); wide layout downloads
+    // packed_mask_buf_ into the same staging.
+    VkBuffer out_buf = use_wide_layout_ ? packed_mask_buf_ : out_device;
+    StagingBuffer out_stg{}; out_stg.buffer = out_staging;
     barrier_compute_to_transfer();
-    cmd_download_to_staging(out_buf, staging_out_, mask_byte_size_);
+    cmd_download_to_staging(out_buf, out_stg, mask_byte_size_);
     return true;
 }
 
@@ -321,13 +352,10 @@ void VibeGpuPipeline::destroy(VulkanContext& ctx)
 
     ctx.wait_idle();
 
-    spc::gpu::destroy_buffer(ctx, input_buf_, input_mem_);
+    // input upload + output buffers are engine-owned now — nothing to free here.
     spc::gpu::destroy_buffer(ctx, bg_model_buf_, bg_model_mem_);
-    spc::gpu::destroy_buffer(ctx, output_buf_, output_mem_);
     spc::gpu::destroy_buffer(ctx, detect_mask_buf_, detect_mask_mem_);
     spc::gpu::destroy_buffer(ctx, packed_mask_buf_, packed_mask_mem_);
-    staging_in_.destroy(ctx);
-    staging_out_.destroy(ctx);
     staging_mask_.destroy(ctx);
 
     spc::gpu::destroy_shader_object(ctx, init_shader_); init_shader_ = VK_NULL_HANDLE;

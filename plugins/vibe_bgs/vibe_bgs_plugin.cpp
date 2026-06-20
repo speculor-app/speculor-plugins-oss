@@ -336,6 +336,32 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t inpu
 // gpu_input correctly observe the upstream compute writes.
 
 #ifdef SPC_HAS_VULKAN
+// Acquire the engine-owned K-deep INPUT upload ring slot for this frame and
+// memcpy the CPU frame into its staging. Only used when the upstream input is
+// NOT already GPU-resident (gpu_input == NULL). Returns the slot's device +
+// staging buffers via out params; returns false if the host has no edge-ring
+// service or allocation failed (caller demotes to CPU). The upload ring slot
+// rotates with the executor's shared per-frame counter, so frame N's upload
+// can't clobber a slot a prior in-flight submit is still reading — this is the
+// last write hazard that K=2 closes on the vibe→dual_morph chain.
+static bool acquire_input_upload(VibeBgsState* s, SpcGpuRecordCtx* rctx,
+                                 const SpcFrame* in_frame, uint32_t frame_size,
+                                 VkBuffer& in_device, VkBuffer& in_staging)
+{
+    in_device = VK_NULL_HANDLE;
+    in_staging = VK_NULL_HANDLE;
+    if (!rctx->edge_ring_ctx) return false;
+    SpcGpuEdgeBuffer up = s->host.acquire_ringed_upload(
+        rctx->edge_ring_ctx, 0,
+        static_cast<uint64_t>(s->gpu_pipeline->input_device_size()),
+        static_cast<uint64_t>(frame_size));
+    if (!up.device_buffer || !up.staging_buffer || !up.staging_mapped) return false;
+    std::memcpy(up.staging_mapped, in_frame->data, frame_size);
+    in_device  = static_cast<VkBuffer>(up.device_buffer);
+    in_staging = static_cast<VkBuffer>(up.staging_buffer);
+    return true;
+}
+
 static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
 {
     auto* s = state(inst);
@@ -415,55 +441,82 @@ static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
     pc.frame_number = s->gpu_frame_counter++;
     pc.bytes_per_channel = bytes_per_channel;
 
-    // First-frame init: record the upload + init dispatch into the engine
-    // secondary so it executes after upstream writes (see comment above).
-    if (!s->gpu_pipeline->model_initialized()) {
-        auto init_cmd = static_cast<VkCommandBuffer>(rctx->cmd_buffer_handle);
-        if (!init_cmd) return -1;
-        if (!s->gpu_pipeline->record_init(*s->gpu_ctx, init_cmd,
-                                          in_frame->data, frame_size, pc, gpu_input_buf))
-            return -1;
-        s->gpu_model_initialized = true;
-        // First frame's mask is conventionally all-zero. Emit zero mask + passthrough.
-        SpcFrame* out = s->host.acquire_frame(0, w, h, SPC_PIXEL_FORMAT_GRAY8);
-        if (out) {
-            std::memset(out->data, 0, static_cast<size_t>(out->stride) * h);
-            out->frame_number = in_frame->frame_number;
-            out->timestamp_ns = in_frame->timestamp_ns;
-            rctx->outputs[0].type = SPC_DATA_FRAME;
-            rctx->outputs[0].frame = out;
-        }
-        rctx->outputs[1].type = SPC_DATA_FRAME;
-        rctx->outputs[1].frame = const_cast<SpcFrame*>(in_frame);
-        return 0;
-    }
+    auto cmd = static_cast<VkCommandBuffer>(rctx->cmd_buffer_handle);
+    if (!cmd) return -1;
 
     SpcFrame* out = s->host.acquire_frame(0, w, h, SPC_PIXEL_FORMAT_GRAY8);
     if (!out) return -1;
 
-    auto cmd = static_cast<VkCommandBuffer>(rctx->cmd_buffer_handle);
-    if (!cmd) {
+    // Acquire the engine-owned OUTPUT ring slot for this frame (binding 2 +
+    // download dst). The engine registers the slot's buffer + staging against
+    // the returned gpu_handle so the post-submit invalidate covers it and
+    // dual_morph resolves it by handle — exactly the prior single-handle
+    // contract at depth==1. width/height/stride/format describe `out`. A
+    // zeroed return (host predates edge rings / alloc failed) demotes to CPU.
+    // Acquired for the init frame too so the init dispatch's binding 2 is a
+    // valid buffer (the init shader doesn't write it, but it must be bound).
+    if (!rctx->edge_ring_ctx) { s->host.release_frame(out); return -1; }
+    SpcGpuEdgeBuffer outbuf = s->host.acquire_ringed_output(
+        rctx->edge_ring_ctx, 0, w, h, out->stride, SPC_PIXEL_FORMAT_GRAY8,
+        static_cast<uint64_t>(s->gpu_pipeline->output_device_size()),
+        static_cast<uint64_t>(s->gpu_pipeline->output_staging_size()));
+    if (!outbuf.device_buffer || !outbuf.staging_buffer || outbuf.gpu_handle == 0) {
         s->host.release_frame(out);
         return -1;
+    }
+
+    // CPU-fed input → acquire the upload ring slot + memcpy the frame in.
+    // GPU-resident input → device-to-device, no upload ring.
+    VkBuffer in_device = VK_NULL_HANDLE, in_staging = VK_NULL_HANDLE;
+    if (gpu_input_buf == VK_NULL_HANDLE &&
+        !acquire_input_upload(s, rctx, in_frame, frame_size, in_device, in_staging)) {
+        s->host.release_frame(out);
+        return -1;
+    }
+
+    // First-frame init: record the upload + init dispatch into the engine
+    // secondary so it executes after upstream writes (see comment above). The
+    // first frame's mask is conventionally all-zero — emit a CPU zero mask
+    // (NOT GPU-resident) + passthrough; the output ring slot was acquired only
+    // to keep binding 2 valid.
+    if (!s->gpu_pipeline->model_initialized()) {
+        if (!s->gpu_pipeline->record_init(*s->gpu_ctx, cmd,
+                                          in_device, in_staging, frame_size,
+                                          static_cast<VkBuffer>(outbuf.device_buffer),
+                                          pc, gpu_input_buf)) {
+            s->host.release_frame(out);
+            return -1;
+        }
+        s->gpu_model_initialized = true;
+        std::memset(out->data, 0, static_cast<size_t>(out->stride) * h);
+        out->frame_number = in_frame->frame_number;
+        out->timestamp_ns = in_frame->timestamp_ns;
+        rctx->outputs[0].type = SPC_DATA_FRAME;
+        rctx->outputs[0].frame = out;
+        rctx->outputs[1].type = SPC_DATA_FRAME;
+        rctx->outputs[1].frame = const_cast<SpcFrame*>(in_frame);
+        return 0;
     }
 
     const uint8_t* det_mask = s->has_cached_mask ? s->cached_mask.data : nullptr;
     uint32_t det_mask_size  = s->has_cached_mask ? mask_size : 0;
 
     if (!s->gpu_pipeline->record(*s->gpu_ctx, cmd,
-                                  in_frame->data, frame_size,
+                                  in_device, in_staging, frame_size,
+                                  static_cast<VkBuffer>(outbuf.device_buffer),
+                                  static_cast<VkBuffer>(outbuf.staging_buffer),
                                   det_mask, det_mask_size,
                                   pc, gpu_input_buf)) {
         s->host.release_frame(out);
         return -1;
     }
 
-    s->gpu_output.bind_to_frame(s->gpu_ctx, out, in_frame,
-                                 s->gpu_pipeline->packed_mask_buffer(),
-                                 s->gpu_pipeline->packed_mask_memory(),
-                                 s->gpu_pipeline->packed_mask_bytes(),
-                                 s->gpu_pipeline->staging_output_mapped(),
-                                 &s->gpu_pipeline->output_staging());
+    // Stamp the output frame as GPU-resident from the engine ring slot's
+    // handle. The engine already registered the slot buffer + staging, so we
+    // just publish the handle + frame metadata (same fields
+    // GpuOutputHandle::bind_to_frame set on the prior path).
+    out->gpu_handle   = outbuf.gpu_handle;
+    out->gpu_flags   |= SPC_GPU_FLAG_RESIDENT;
     out->frame_number = in_frame->frame_number;
     out->timestamp_ns = in_frame->timestamp_ns;
     rctx->outputs[0].type = SPC_DATA_FRAME;
