@@ -269,13 +269,13 @@ bool VibeGpuPipeline::record_init(VulkanContext& ctx, VkCommandBuffer cmd,
 
 bool VibeGpuPipeline::record(VulkanContext& ctx, VkCommandBuffer cmd,
                               VkBuffer in_device, VkBuffer in_staging, uint32_t frame_size,
-                              VkBuffer out_device, VkBuffer out_staging,
+                              VkBuffer out_device,
                               const uint8_t* detect_mask, uint32_t mask_size,
                               const VibePushConstants& params,
                               VkBuffer gpu_input)
 {
     if (!ctx.valid || !model_initialized_) return false;
-    if (out_device == VK_NULL_HANDLE || out_staging == VK_NULL_HANDLE) return false;
+    if (out_device == VK_NULL_HANDLE) return false;
 
     // Input binding 0 = upstream GPU output (device-to-device) or the upload
     // ring slot the plugin already memcpy'd the CPU frame into.
@@ -334,15 +334,6 @@ bool VibeGpuPipeline::record(VulkanContext& ctx, VkCommandBuffer cmd,
                              push_bufs_, push_sizes_, 5,
                              pc, pack_groups, 1);
     }
-
-    // readback to the OUTPUT ring slot's staging — engine handles the wait +
-    // invalidate via the registry. Non-wide (active) path downloads the
-    // process shader's direct output (out_device); wide layout downloads
-    // packed_mask_buf_ into the same staging.
-    VkBuffer out_buf = use_wide_layout_ ? packed_mask_buf_ : out_device;
-    StagingBuffer out_stg{}; out_stg.buffer = out_staging;
-    barrier_compute_to_transfer();
-    cmd_download_to_staging(out_buf, out_stg, mask_byte_size_);
     return true;
 }
 

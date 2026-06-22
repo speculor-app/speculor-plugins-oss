@@ -439,7 +439,8 @@ static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
         rctx->edge_ring_ctx, 0, w, h, out->stride, SPC_PIXEL_FORMAT_GRAY8,
         static_cast<uint64_t>(s->gpu_pipeline->output_device_size()),
         static_cast<uint64_t>(s->gpu_pipeline->output_staging_size()));
-    if (!outbuf.device_buffer || !outbuf.staging_buffer || outbuf.gpu_handle == 0) {
+    // staging may be null — only the device buffer + registry handle are required
+    if (!outbuf.device_buffer || outbuf.gpu_handle == 0) {
         s->host.release_frame(out);
         return -1;
     }
@@ -486,7 +487,6 @@ static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
     if (!s->gpu_pipeline->record(*s->gpu_ctx, cmd,
                                   in_device, in_staging,
                                   static_cast<VkBuffer>(outbuf.device_buffer),
-                                  static_cast<VkBuffer>(outbuf.staging_buffer),
                                   mask_ptr, mask_stride,
                                   pc, gpu_input_buf)) {
         s->host.release_frame(out);

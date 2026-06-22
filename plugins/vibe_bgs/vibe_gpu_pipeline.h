@@ -71,11 +71,11 @@ public:
     // plugin already memcpy'd the CPU frame into in_staging's mapped memory.
     //   in_device / in_staging — upload ring slot (binding 0 + upload source);
     //                            ignored when gpu_input != NULL.
-    //   out_device / out_staging — output ring slot (binding 2 + download dst).
+    //   out_device — output ring slot (binding 2).
     //   detect_mask — optional, uploaded via the pipeline's own staging_mask_.
     bool record(VulkanContext& ctx, VkCommandBuffer cmd,
                 VkBuffer in_device, VkBuffer in_staging, uint32_t frame_size,
-                VkBuffer out_device, VkBuffer out_staging,
+                VkBuffer out_device,
                 const uint8_t* detect_mask, uint32_t mask_size,
                 const VibePushConstants& params,
                 VkBuffer gpu_input = VK_NULL_HANDLE);

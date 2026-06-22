@@ -257,13 +257,13 @@ bool SubsenseGpuPipeline::record_init(VulkanContext& ctx, VkCommandBuffer cmd,
 
 bool SubsenseGpuPipeline::record(VulkanContext& ctx, VkCommandBuffer cmd,
                                   VkBuffer in_device, VkBuffer in_staging,
-                                  VkBuffer out_device, VkBuffer out_staging,
+                                  VkBuffer out_device,
                                   const uint8_t* detect_mask, int mask_stride,
                                   const SubsensePushConstants& params,
                                   VkBuffer gpu_input)
 {
     if (!ctx.valid || !model_initialized_) return false;
-    if (out_device == VK_NULL_HANDLE || out_staging == VK_NULL_HANDLE) return false;
+    if (out_device == VK_NULL_HANDLE) return false;
 
     VkBuffer in_buf = (gpu_input != VK_NULL_HANDLE) ? gpu_input : in_device;
     if (in_buf == VK_NULL_HANDLE) return false;
@@ -312,14 +312,6 @@ bool SubsenseGpuPipeline::record(VulkanContext& ctx, VkCommandBuffer cmd,
                              push_bufs_, push_sizes_, NUM_BUFFERS + 1,
                              params, pack_groups, 1);
     }
-
-    // Download to the output ring slot's staging — engine handles the wait +
-    // invalidate via the registry. Non-wide (active) path downloads the process
-    // shader's direct output (out_device).
-    barrier_compute_to_transfer();
-    StagingBuffer out_stg{}; out_stg.buffer = out_staging;
-    cmd_download_to_staging(use_wide_layout_ ? packed_mask_buf_ : out_device,
-                            out_stg, mask_bytes_);
     return true;
 }
 
