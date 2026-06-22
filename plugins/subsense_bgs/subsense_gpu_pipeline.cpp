@@ -85,9 +85,7 @@ bool SubsenseGpuPipeline::prepare(VulkanContext& ctx, uint32_t width, uint32_t h
     // wait for any in-flight work
     wait_timeline_idle(ctx);
 
-    // free old buffers
-    staging_in_.destroy(ctx);
-    staging_out_.destroy(ctx);
+    // free old buffers (input upload + output are engine-owned ring slots now)
     staging_mask_.destroy(ctx);
     for (int i = 0; i < NUM_BUFFERS; ++i)
         spc::gpu::destroy_buffer(ctx, bufs_[i], mems_[i]);
@@ -121,9 +119,7 @@ bool SubsenseGpuPipeline::prepare(VulkanContext& ctx, uint32_t width, uint32_t h
                         VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
     auto device_mem = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
 
-    // buf[0]: input frame
-    if (!spc::gpu::create_buffer(ctx, frame_bytes_, device_usage, device_mem, bufs_[0], mems_[0]))
-    { width_ = 0; return false; }
+    // buf[0] (input) is an engine upload ring slot — not allocated here.
 
     // buf[1]: bg_colors
     if (!spc::gpu::create_buffer(ctx, bg_color_bytes_, device_usage, device_mem, bufs_[1], mems_[1]))
@@ -137,122 +133,115 @@ bool SubsenseGpuPipeline::prepare(VulkanContext& ctx, uint32_t width, uint32_t h
     if (!spc::gpu::create_buffer(ctx, mask_bytes_, device_usage, device_mem, bufs_[3], mems_[3]))
     { width_ = 0; return false; }
 
-    // buf[4]: output mask
-    if (!spc::gpu::create_buffer(ctx, mask_bytes_, device_usage, device_mem, bufs_[4], mems_[4]))
-    { width_ = 0; return false; }
+    // buf[4] (output) is an engine output ring slot — not allocated here.
 
-    // packed GRAY8 output buffer (binding 5) — for GPU-resident mask output
+    // packed GRAY8 output buffer (binding 5) — bound for descriptor validity
     if (!spc::gpu::create_buffer(ctx, mask_bytes_,
                                   VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                   device_mem, packed_mask_buf_, packed_mask_mem_))
     { width_ = 0; return false; }
 
-    // staging buffers
-    if (!staging_in_.allocate(ctx, frame_bytes_, VK_BUFFER_USAGE_TRANSFER_SRC_BIT))
-    { width_ = 0; return false; }
-
-    if (!staging_out_.allocate(ctx, mask_bytes_, VK_BUFFER_USAGE_TRANSFER_DST_BIT))
-    { width_ = 0; return false; }
-
+    // staging for the optional detect mask (binding 3 upload source). The input
+    // frame upload + output mask download staging are engine-owned ring slots.
     if (!staging_mask_.allocate(ctx, mask_bytes_, VK_BUFFER_USAGE_TRANSFER_SRC_BIT))
     { width_ = 0; return false; }
 
-    // populate push descriptor cache
-    constexpr int TOTAL_BINDINGS = NUM_BUFFERS + 1;
-    push_bufs_[0] = bufs_[0];        push_sizes_[0] = frame_bytes_;
+    // populate push descriptor cache. Bindings 0 (input) and 4 (output) are
+    // engine ring slots re-pointed per frame; seed them null here.
+    push_bufs_[0] = VK_NULL_HANDLE;  push_sizes_[0] = frame_bytes_;
     push_bufs_[1] = bufs_[1];        push_sizes_[1] = bg_color_bytes_;
     push_bufs_[2] = bufs_[2];        push_sizes_[2] = bg_desc_bytes_;
     push_bufs_[3] = bufs_[3];        push_sizes_[3] = mask_bytes_;
-    push_bufs_[4] = bufs_[4];        push_sizes_[4] = mask_bytes_;
+    push_bufs_[4] = VK_NULL_HANDLE;  push_sizes_[4] = mask_bytes_;
     push_bufs_[5] = packed_mask_buf_; push_sizes_[5] = mask_bytes_;
 
+    // Non-push-descriptor path writes the stable bindings (1/2/3/5) once here;
+    // bindings 0/4 are written per-frame in record()/record_init().
     if (!ctx.has_push_descriptors)
     {
-        VkDescriptorBufferInfo buf_infos[TOTAL_BINDINGS]{};
-        buf_infos[0] = {bufs_[0], 0, frame_bytes_};
-        buf_infos[1] = {bufs_[1], 0, bg_color_bytes_};
-        buf_infos[2] = {bufs_[2], 0, bg_desc_bytes_};
-        buf_infos[3] = {bufs_[3], 0, mask_bytes_};
-        buf_infos[4] = {bufs_[4], 0, mask_bytes_};
-        buf_infos[5] = {packed_mask_buf_, 0, mask_bytes_};
+        const uint32_t bindings[4] = {1, 2, 3, 5};
+        VkDescriptorBufferInfo buf_infos[4]{};
+        buf_infos[0] = {bufs_[1], 0, bg_color_bytes_};
+        buf_infos[1] = {bufs_[2], 0, bg_desc_bytes_};
+        buf_infos[2] = {bufs_[3], 0, mask_bytes_};
+        buf_infos[3] = {packed_mask_buf_, 0, mask_bytes_};
 
-        VkWriteDescriptorSet writes[TOTAL_BINDINGS]{};
-        for (int i = 0; i < TOTAL_BINDINGS; ++i)
+        VkWriteDescriptorSet writes[4]{};
+        for (int i = 0; i < 4; ++i)
         {
             writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[i].dstSet = desc_set_;
-            writes[i].dstBinding = static_cast<uint32_t>(i);
+            writes[i].dstBinding = bindings[i];
             writes[i].descriptorCount = 1;
             writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             writes[i].pBufferInfo = &buf_infos[i];
         }
-        vkUpdateDescriptorSets(ctx.device, TOTAL_BINDINGS, writes, 0, nullptr);
+        vkUpdateDescriptorSets(ctx.device, 4, writes, 0, nullptr);
     }
 
     return true;
 }
 
-bool SubsenseGpuPipeline::run_init(VulkanContext& ctx,
-                                    const uint8_t* frame_data, int frame_stride,
-                                    const SubsensePushConstants& params,
-                                    VkBuffer gpu_input)
+// Re-point the per-frame ring bindings: 0 (input) and 4 (output). For the
+// push-descriptor path this updates the cache the dispatch reads; for the
+// classic descriptor-set path it writes the set. `out` may be VK_NULL_HANDLE
+// for the init pass (which doesn't write the output binding).
+void SubsenseGpuPipeline::set_ring_bindings(VulkanContext& ctx, VkBuffer in, VkBuffer out)
 {
-    if (!staging_in_.mapped) return false;
+    push_bufs_[0] = in;
+    if (out != VK_NULL_HANDLE) push_bufs_[4] = out;
 
-    // upload frame data: skip CPU staging if GPU-resident input
-    if (gpu_input == VK_NULL_HANDLE) {
-        auto* staging = static_cast<uint8_t*>(staging_in_.mapped);
-        int row_bytes = static_cast<int>(width_) * num_channels_;
-        if (frame_stride == row_bytes)
-        {
-            std::memcpy(staging, frame_data, static_cast<size_t>(row_bytes) * height_);
+    if (!ctx.has_push_descriptors)
+    {
+        VkDescriptorBufferInfo infos[2]{};
+        VkWriteDescriptorSet writes[2]{};
+        uint32_t n = 0;
+        infos[n] = {in, 0, frame_bytes_};
+        writes[n].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[n].dstSet = desc_set_; writes[n].dstBinding = 0;
+        writes[n].descriptorCount = 1;
+        writes[n].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        writes[n].pBufferInfo = &infos[n];
+        ++n;
+        if (out != VK_NULL_HANDLE) {
+            infos[n] = {out, 0, mask_bytes_};
+            writes[n].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[n].dstSet = desc_set_; writes[n].dstBinding = 4;
+            writes[n].descriptorCount = 1;
+            writes[n].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            writes[n].pBufferInfo = &infos[n];
+            ++n;
         }
-        else
-        {
-            for (uint32_t y = 0; y < height_; ++y)
-                std::memcpy(staging + y * row_bytes, frame_data + y * frame_stride, row_bytes);
-        }
+        vkUpdateDescriptorSets(ctx.device, n, writes, 0, nullptr);
     }
-
-    if (!begin_recording(ctx)) return false;
-    cmd_upload_input(staging_in_, bufs_[0], frame_bytes_, gpu_input);
-    barrier_transfer_to_compute();
-
-    uint32_t gx = (params.width + 15) / 16;
-    uint32_t gy = (params.height + 15) / 16;
-    cmd_dispatch_compute(ctx, init_pipeline_, init_shader_,
-                         pipeline_layout_, desc_set_,
-                         push_bufs_, push_sizes_, NUM_BUFFERS + 1,
-                         params, gx, gy);
-
-    if (!submit_and_wait(ctx)) return false;
-
-    model_initialized_ = true;
-    return true;
 }
 
 bool SubsenseGpuPipeline::record_init(VulkanContext& ctx, VkCommandBuffer cmd,
-                                       const uint8_t* frame_data, int frame_stride,
+                                       VkBuffer in_device, VkBuffer in_staging,
+                                       VkBuffer out_device,
                                        const SubsensePushConstants& params,
                                        VkBuffer gpu_input)
 {
-    if (!ctx.valid || !staging_in_.mapped) return false;
+    if (!ctx.valid) return false;
+    if (out_device == VK_NULL_HANDLE) return false;
 
-    if (gpu_input == VK_NULL_HANDLE) {
-        if (!frame_data) return false;
-        auto* staging = static_cast<uint8_t*>(staging_in_.mapped);
-        int row_bytes = static_cast<int>(width_) * num_channels_;
-        if (frame_stride == row_bytes) {
-            std::memcpy(staging, frame_data, static_cast<size_t>(row_bytes) * height_);
-        } else {
-            for (uint32_t y = 0; y < height_; ++y)
-                std::memcpy(staging + y * row_bytes, frame_data + y * frame_stride, row_bytes);
-        }
-    }
+    // Input binding 0 = upstream GPU output (device-to-device) or the upload
+    // ring slot the plugin already filled. Binding 4 (output) gets a valid
+    // buffer so the descriptor set is fully bound even though the init shader
+    // doesn't write it.
+    VkBuffer in_buf = (gpu_input != VK_NULL_HANDLE) ? gpu_input : in_device;
+    if (in_buf == VK_NULL_HANDLE) return false;
+    set_ring_bindings(ctx, in_buf, out_device);
 
     ScopedExternalRecording scope(*this, cmd);
 
-    cmd_upload_input(staging_in_, bufs_[0], frame_bytes_, gpu_input);
+    // Upload only when CPU-fed: copy the upload ring slot's staging into its
+    // device buffer (the CPU memcpy into staging already happened in the
+    // plugin). When gpu_input != NULL the input is read device-to-device.
+    if (gpu_input == VK_NULL_HANDLE) {
+        StagingBuffer in_stg{}; in_stg.buffer = in_staging;
+        cmd_upload_input(in_stg, in_device, frame_bytes_);
+    }
     barrier_transfer_to_compute();
 
     uint32_t gx = (params.width + 15) / 16;
@@ -267,25 +256,17 @@ bool SubsenseGpuPipeline::record_init(VulkanContext& ctx, VkCommandBuffer cmd,
 }
 
 bool SubsenseGpuPipeline::record(VulkanContext& ctx, VkCommandBuffer cmd,
-                                  const uint8_t* frame_data, int frame_stride,
+                                  VkBuffer in_device, VkBuffer in_staging,
+                                  VkBuffer out_device, VkBuffer out_staging,
                                   const uint8_t* detect_mask, int mask_stride,
                                   const SubsensePushConstants& params,
                                   VkBuffer gpu_input)
 {
-    if (!ctx.valid || !frame_data || !model_initialized_) return false;
-    if (!staging_in_.mapped) return false;
+    if (!ctx.valid || !model_initialized_) return false;
+    if (out_device == VK_NULL_HANDLE || out_staging == VK_NULL_HANDLE) return false;
 
-    // Stage the input frame (only if upstream isn't already GPU-resident).
-    if (gpu_input == VK_NULL_HANDLE) {
-        auto* staging = static_cast<uint8_t*>(staging_in_.mapped);
-        int row_bytes = static_cast<int>(width_) * num_channels_;
-        if (frame_stride == row_bytes) {
-            std::memcpy(staging, frame_data, static_cast<size_t>(row_bytes) * height_);
-        } else {
-            for (uint32_t y = 0; y < height_; ++y)
-                std::memcpy(staging + y * row_bytes, frame_data + y * frame_stride, row_bytes);
-        }
-    }
+    VkBuffer in_buf = (gpu_input != VK_NULL_HANDLE) ? gpu_input : in_device;
+    if (in_buf == VK_NULL_HANDLE) return false;
 
     bool has_mask = (detect_mask != nullptr && params.has_mask != 0);
     if (has_mask) {
@@ -298,9 +279,19 @@ bool SubsenseGpuPipeline::record(VulkanContext& ctx, VkCommandBuffer cmd,
         }
     }
 
+    // Re-point bindings 0 (input ring slot) and 4 (output ring slot) at this
+    // frame's buffers. At depth==1 these are the single slots, byte-identical
+    // to the prior single-buffer path.
+    set_ring_bindings(ctx, in_buf, out_device);
+
     ScopedExternalRecording scope(*this, cmd);
 
-    cmd_upload_input(staging_in_, bufs_[0], frame_bytes_, gpu_input);
+    // Frame upload: device-to-device (gpu_input) or staging-to-device (the
+    // upload ring slot the plugin already memcpy'd into).
+    if (gpu_input == VK_NULL_HANDLE) {
+        StagingBuffer in_stg{}; in_stg.buffer = in_staging;
+        cmd_upload_input(in_stg, in_device, frame_bytes_);
+    }
     if (has_mask)
         cmd_upload_input(staging_mask_, bufs_[3], mask_bytes_);
     barrier_transfer_to_compute();
@@ -322,9 +313,13 @@ bool SubsenseGpuPipeline::record(VulkanContext& ctx, VkCommandBuffer cmd,
                              params, pack_groups, 1);
     }
 
+    // Download to the output ring slot's staging — engine handles the wait +
+    // invalidate via the registry. Non-wide (active) path downloads the process
+    // shader's direct output (out_device).
     barrier_compute_to_transfer();
-    cmd_download_to_staging(use_wide_layout_ ? packed_mask_buf_ : bufs_[4],
-                            staging_out_, mask_bytes_);
+    StagingBuffer out_stg{}; out_stg.buffer = out_staging;
+    cmd_download_to_staging(use_wide_layout_ ? packed_mask_buf_ : out_device,
+                            out_stg, mask_bytes_);
     return true;
 }
 
@@ -332,8 +327,7 @@ void SubsenseGpuPipeline::destroy(VulkanContext& ctx)
 {
     if (!ctx.device) return;
 
-    staging_in_.destroy(ctx);
-    staging_out_.destroy(ctx);
+    // input upload + output buffers are engine-owned now — nothing to free here.
     staging_mask_.destroy(ctx);
     for (int i = 0; i < NUM_BUFFERS; ++i)
         spc::gpu::destroy_buffer(ctx, bufs_[i], mems_[i]);

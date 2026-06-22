@@ -43,52 +43,47 @@ public:
     bool prepare(VulkanContext& ctx, uint32_t width, uint32_t height,
                  int num_channels, int bg_samples);
 
-    // run initialization pass (first frame — fills background model).
-    // Plugin-private cmd buf + submit_and_wait — use only for the CPU/legacy
-    // path where no engine secondary is available.
-    bool run_init(VulkanContext& ctx, const uint8_t* frame_data, int frame_stride,
-                  const SubsensePushConstants& params,
-                  VkBuffer gpu_input = VK_NULL_HANDLE);
-
-    // Engine-driven coalesced-submit variant of run_init. Records upload +
-    // barrier + init dispatch into the supplied secondary so the read of
-    // gpu_input is properly ordered after upstream writes via the engine's
-    // inter-member barrier. Flips model_initialized_ on success.
+    // Engine-driven coalesced-submit init pass (first frame — fills background
+    // model). Records upload + barrier + init dispatch into the supplied
+    // secondary so the read of gpu_input is properly ordered after upstream
+    // writes via the engine's inter-member barrier. Flips model_initialized_
+    // on success.
+    //
+    // in_device / in_staging are the engine-owned INPUT upload ring slot (the
+    // plugin already memcpy'd the CPU frame into in_staging's mapped memory);
+    // out_device is the engine-owned OUTPUT ring slot bound to binding 4 so the
+    // descriptor set is fully valid. When gpu_input != NULL the upstream output
+    // is read device-to-device and in_device / in_staging are ignored.
     bool record_init(VulkanContext& ctx, VkCommandBuffer cmd,
-                     const uint8_t* frame_data, int frame_stride,
+                     VkBuffer in_device, VkBuffer in_staging,
+                     VkBuffer out_device,
                      const SubsensePushConstants& params,
                      VkBuffer gpu_input = VK_NULL_HANDLE);
 
     // Engine-driven coalesced submit (Phase 7). Records the per-frame
     // process dispatches into the supplied secondary cmd buffer and returns
-    // without submitting. Caller must guarantee model_ready() is true (i.e.
-    // run_init has completed); first-frame init still uses the plugin's own
-    // cmd_buf, same as mog2_bgs.
+    // without submitting. Caller must guarantee model_ready() is true.
+    //
+    // Both the INPUT upload buffer and the OUTPUT buffer are engine-owned
+    // K-deep ring slots resolved by the plugin from the host (so frame N's
+    // buffers don't clobber a still-in-flight frame's). The plugin already
+    // memcpy'd the CPU frame into in_staging's mapped memory.
+    //   in_device / in_staging — upload ring slot (binding 0 + upload source);
+    //                            ignored when gpu_input != NULL.
+    //   out_device / out_staging — output ring slot (binding 4 + download dst).
+    //   detect_mask — optional, uploaded via the pipeline's own staging_mask_.
     bool record(VulkanContext& ctx, VkCommandBuffer cmd,
-                const uint8_t* frame_data, int frame_stride,
+                VkBuffer in_device, VkBuffer in_staging,
+                VkBuffer out_device, VkBuffer out_staging,
                 const uint8_t* detect_mask, int mask_stride,
                 const SubsensePushConstants& params,
                 VkBuffer gpu_input = VK_NULL_HANDLE);
 
-    VkBuffer input_buffer() const { return bufs_[0]; }
-    VkDeviceSize frame_byte_size() const { return frame_bytes_; }
-
-    // GPU-resident packed GRAY8 output. Returns whichever buffer the compute
-    // just wrote into: in wide layout the pack_mask shader produces
-    // packed_mask_buf_; in non-wide layout (today's only active path) the
-    // process shader writes packed GRAY8 directly into bufs_[4] (output),
-    // and packed_mask_buf_ stays empty — returning it would register a zero
-    // buffer for GPU-resident downstream consumers.
-    VkBuffer packed_mask_buffer() const {
-        return use_wide_layout_ ? packed_mask_buf_ : bufs_[4];
-    }
-    VkDeviceMemory packed_mask_memory() const {
-        return use_wide_layout_ ? packed_mask_mem_ : mems_[4];
-    }
+    // Byte sizes the plugin passes to the host's edge-ring acquire calls.
+    VkDeviceSize input_device_size() const { return frame_bytes_; }
+    VkDeviceSize output_device_size() const { return mask_bytes_; }
+    VkDeviceSize output_staging_size() const { return mask_bytes_; }
     VkDeviceSize packed_mask_bytes() const { return mask_bytes_; }
-    const void* staging_output_mapped() const { return staging_out_.mapped; }
-    const StagingBuffer& output_staging() const { return staging_out_; }
-    void invalidate_staging_output(VulkanContext& ctx) { staging_out_.invalidate(ctx); }
 
     void destroy(VulkanContext& ctx);
 
@@ -96,6 +91,12 @@ public:
     bool model_ready() const { return model_initialized_; }
 
 private:
+    // Re-point the per-frame ring bindings 0 (input) and 4 (output). `out` ==
+    // VK_NULL_HANDLE leaves binding 4 untouched (the init pass doesn't write
+    // the output). Updates the push-descriptor cache, or writes the classic
+    // descriptor set when push descriptors are unavailable.
+    void set_ring_bindings(VulkanContext& ctx, VkBuffer in, VkBuffer out);
+
     VkPipelineLayout pipeline_layout_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout desc_layout_ = VK_NULL_HANDLE;
     VkDescriptorPool desc_pool_ = VK_NULL_HANDLE;
@@ -107,22 +108,29 @@ private:
     VkShaderEXT process_shader_ = VK_NULL_HANDLE;
     VkShaderEXT pack_mask_shader_ = VK_NULL_HANDLE;
 
-    // 5 buffers: input, bg_colors, bg_descs, detect_mask, output
+    // 5 buffers: input, bg_colors, bg_descs, detect_mask, output.
+    // bufs_[0] (input, binding 0) and bufs_[4] (output, binding 4) are NO
+    // LONGER owned here — they are engine-owned K-deep ring slots resolved
+    // per-frame from the host (acquire_ringed_upload / acquire_ringed_output).
+    // At K=1 each is a single slot, byte-identical to the prior plugin-owned
+    // single buffer. bg_colors/bg_descs are genuine cross-frame STATE and
+    // detect_mask is a within-frame side input — all stay single.
     static constexpr int NUM_BUFFERS = 5;
     VkBuffer bufs_[NUM_BUFFERS]{};
     VkDeviceMemory mems_[NUM_BUFFERS]{};
 
-    // packed GRAY8 output buffer (binding 5)
+    // packed GRAY8 output buffer (binding 5) — bound for descriptor validity
+    // (only written by the disabled wide-layout pack_mask shader).
     VkBuffer packed_mask_buf_ = VK_NULL_HANDLE;
     VkDeviceMemory packed_mask_mem_ = VK_NULL_HANDLE;
 
-    // push descriptor buffer cache
+    // push descriptor buffer cache. Bindings 0 (input) and 4 (output) are
+    // engine-ring slots re-pointed per frame; the rest are stable.
     VkBuffer push_bufs_[NUM_BUFFERS + 1] = {};
     VkDeviceSize push_sizes_[NUM_BUFFERS + 1] = {};
 
-    // staging buffers (host-visible, persistently mapped)
-    StagingBuffer staging_in_;
-    StagingBuffer staging_out_;
+    // staging buffer for the optional detect_mask (host-visible, mapped). The
+    // input upload + output download staging are now engine-owned ring slots.
     StagingBuffer staging_mask_;
 
     // cached dimensions

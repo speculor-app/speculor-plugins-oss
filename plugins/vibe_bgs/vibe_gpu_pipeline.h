@@ -42,55 +42,49 @@ public:
     bool prepare(VulkanContext& ctx, uint32_t width, uint32_t height,
                  int num_channels, int bytes_per_channel, int bg_samples);
 
-    // run initialization pass (first frame), plugin-private cmd buf + submit-and-wait.
-    // Use only for the CPU/legacy path where no engine secondary is available.
-    // gpu_input: if non-null, device-to-device copy replaces CPU staging upload
-    bool run_init(VulkanContext& ctx, const uint8_t* frame_data, uint32_t frame_size,
-                  const VibePushConstants& params,
-                  VkBuffer gpu_input = VK_NULL_HANDLE);
-
-    // Engine-driven coalesced-submit variant of run_init. Records the
-    // init upload + init dispatch into the supplied secondary so the read
-    // of gpu_input is properly ordered after upstream writes via the
-    // engine's inter-member barrier. Flips model_initialized_ on success;
-    // the engine's submit+wait between frames guarantees the GPU work has
-    // completed before the next record() call sees the model as ready.
+    // Engine-driven coalesced first-frame init. Records the init upload +
+    // init dispatch into the supplied secondary so the read of the input is
+    // ordered after upstream writes via the engine's inter-member barrier.
+    //
+    // The input buffer is engine-owned (K-deep upload ring): the plugin
+    // already memcpy'd the CPU frame into `in_staging`'s mapped memory before
+    // calling this. in_device is the upload ring slot's device buffer (the
+    // init dispatch reads binding 0 from it); in_staging is that slot's
+    // host-visible staging (upload source). When gpu_input != NULL the
+    // upstream output is read directly (device-to-device) and in_device /
+    // in_staging are ignored. Flips model_initialized_ on success.
+    // out_device is the output ring slot's device buffer — bound to binding 2
+    // so the descriptor set is fully valid even though the init shader writes
+    // only bg_model (binding 1), not the output. Must be non-null and sized
+    // output_device_size().
     bool record_init(VulkanContext& ctx, VkCommandBuffer cmd,
-                     const uint8_t* frame_data, uint32_t frame_size,
+                     VkBuffer in_device, VkBuffer in_staging, uint32_t frame_size,
+                     VkBuffer out_device,
                      const VibePushConstants& params,
                      VkBuffer gpu_input = VK_NULL_HANDLE);
 
     // Engine-driven coalesced submit (Phase 7). Records the per-frame
     // dispatches into the supplied secondary cmd buffer and returns without
-    // submitting. Engine assembles secondaries from a subgraph into one
-    // primary and submits once. CPU staging upload of frame_data / detect_mask
-    // happens inline (the secondary cmd buffer doesn't change anything about
-    // staging — that's plain mapped memory).
+    // submitting. Both the INPUT upload buffer and the OUTPUT buffer are
+    // engine-owned K-deep ring slots resolved by the plugin from the host
+    // (so frame N's buffers don't clobber a still-in-flight frame's). The
+    // plugin already memcpy'd the CPU frame into in_staging's mapped memory.
+    //   in_device / in_staging — upload ring slot (binding 0 + upload source);
+    //                            ignored when gpu_input != NULL.
+    //   out_device / out_staging — output ring slot (binding 2 + download dst).
+    //   detect_mask — optional, uploaded via the pipeline's own staging_mask_.
     bool record(VulkanContext& ctx, VkCommandBuffer cmd,
-                const uint8_t* frame_data, uint32_t frame_size,
+                VkBuffer in_device, VkBuffer in_staging, uint32_t frame_size,
+                VkBuffer out_device, VkBuffer out_staging,
                 const uint8_t* detect_mask, uint32_t mask_size,
                 const VibePushConstants& params,
                 VkBuffer gpu_input = VK_NULL_HANDLE);
 
-    VkBuffer input_buffer() const { return input_buf_; }
-    VkDeviceSize frame_byte_size() const { return frame_byte_size_; }
-
-    // GPU-resident packed GRAY8 output. Returns whichever buffer the compute
-    // just wrote into: in wide layout the pack_mask shader produces
-    // packed_mask_buf_; in non-wide layout (today's only active path) the
-    // process shader writes packed GRAY8 directly into output_buf_, and
-    // packed_mask_buf_ stays empty — returning it would register a zero
-    // buffer for GPU-resident downstream consumers.
-    VkBuffer packed_mask_buffer() const {
-        return use_wide_layout_ ? packed_mask_buf_ : output_buf_;
-    }
-    VkDeviceMemory packed_mask_memory() const {
-        return use_wide_layout_ ? packed_mask_mem_ : output_mem_;
-    }
+    // Byte sizes the plugin passes to the host's edge-ring acquire calls.
+    VkDeviceSize input_device_size() const { return frame_byte_size_; }
+    VkDeviceSize output_device_size() const { return output_buf_size_; }
+    VkDeviceSize output_staging_size() const { return staging_out_size_; }
     VkDeviceSize packed_mask_bytes() const { return mask_byte_size_; }
-    const void* staging_output_mapped() const { return staging_out_.mapped; }
-    const StagingBuffer& output_staging() const { return staging_out_; }
-    void invalidate_staging_output(VulkanContext& ctx) { staging_out_.invalidate(ctx); }
     bool model_initialized() const { return model_initialized_; }
 
     void destroy(VulkanContext& ctx);
@@ -98,6 +92,12 @@ public:
     bool initialized() const { return initialized_; }
 
 private:
+    // Re-point the per-frame ring bindings 0 (input) and 2 (output). `out` ==
+    // VK_NULL_HANDLE leaves binding 2 untouched (the init pass doesn't write
+    // the output). Updates the push-descriptor cache, or writes the classic
+    // descriptor set when push descriptors are unavailable.
+    void set_ring_bindings(VulkanContext& ctx, VkBuffer in, VkBuffer out);
+
     // pipelines — packed layout (byte-packed, with atomics — fallback)
     VkPipelineLayout pipeline_layout_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout desc_layout_ = VK_NULL_HANDLE;
@@ -118,25 +118,31 @@ private:
     VkShaderEXT process_wide_shader_ = VK_NULL_HANDLE;
     VkShaderEXT pack_mask_shader_ = VK_NULL_HANDLE;
 
-    // GPU buffers (device-local)
-    VkBuffer input_buf_ = VK_NULL_HANDLE;
-    VkDeviceMemory input_mem_ = VK_NULL_HANDLE;
+    // GPU buffers (device-local). bg_model/detect_mask stay SINGLE: bg_model
+    // is genuine cross-frame state, detect_mask is an optional NON_BLOCKING
+    // side input written-then-read within one frame; the single compute queue
+    // serializes frames in submission order so neither needs ringing.
+    //
+    // The INPUT upload buffer (binding 0) and the OUTPUT buffer (binding 2)
+    // are NO LONGER owned here — they are engine-owned K-deep ring slots
+    // resolved per-frame from the host (acquire_ringed_upload /
+    // acquire_ringed_output). At K=1 each is a single slot, byte-identical to
+    // the prior plugin-owned single buffer.
     VkBuffer bg_model_buf_ = VK_NULL_HANDLE;
     VkDeviceMemory bg_model_mem_ = VK_NULL_HANDLE;
-    VkBuffer output_buf_ = VK_NULL_HANDLE;
-    VkDeviceMemory output_mem_ = VK_NULL_HANDLE;
     VkBuffer detect_mask_buf_ = VK_NULL_HANDLE;
     VkDeviceMemory detect_mask_mem_ = VK_NULL_HANDLE;
-    VkBuffer packed_mask_buf_ = VK_NULL_HANDLE;   // packed GRAY8 output (binding 4)
+    VkBuffer packed_mask_buf_ = VK_NULL_HANDLE;   // packed GRAY8 output (binding 4, wide layout only)
     VkDeviceMemory packed_mask_mem_ = VK_NULL_HANDLE;
 
-    // push descriptor buffer cache
+    // push descriptor buffer cache. Bindings 0 (input) and 2 (output) are
+    // engine-ring slots re-pointed at the top of every record()/record_init();
+    // bindings 1/3/4 are the stable plugin-owned buffers set in prepare().
     VkBuffer push_bufs_[5] = {};
     VkDeviceSize push_sizes_[5] = {};
 
-    // staging buffers (host-visible, persistently mapped)
-    StagingBuffer staging_in_;
-    StagingBuffer staging_out_;
+    // staging buffer for the optional detect_mask (host-visible, mapped). The
+    // input upload staging is now engine-owned (the upload ring slot).
     StagingBuffer staging_mask_;
 
     // cached dimensions and layout
@@ -147,7 +153,6 @@ private:
     int bg_samples_ = 0;
     uint32_t pixel_count_ = 0;
     bool use_wide_layout_ = false;
-    bool use_bar_input_ = false;     // true if input_buf_ is HOST_VISIBLE+DEVICE_LOCAL (ReBAR)
     bool initialized_ = false;
     bool model_initialized_ = false;
 
