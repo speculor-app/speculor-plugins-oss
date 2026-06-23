@@ -22,10 +22,10 @@
 // and record_gpu reads the snapshot directly.
 struct Params
 {
-    int32_t threshold = 50;
+    int32_t threshold = 35;
     int32_t bg_samples = 16;
     int32_t required_bg_samples = 1;
-    int32_t learning_rate = 2;
+    int32_t learning_rate = 8;
 };
 
 // internal state
@@ -73,13 +73,13 @@ SPC_PLUGIN_DESCRIPTOR(
         .output("mask_out", "FG Mask", SPC_DATA_FRAME)
         .output("image_out", "Image", SPC_DATA_FRAME)
         .gpu_compute()
-        .int_param("threshold", "Threshold", 1, 255, 50, 1, "ViBe")
+        .int_param("threshold", "Threshold", 1, 255, 35, 1, "ViBe")
             .param_description("Pixel intensity difference to classify as foreground")
         .int_param("bg_samples", "BG Samples", 2, 64, 16, 2, "ViBe")
             .param_description("Number of background samples stored per pixel")
         .int_param("required_bg_samples", "Required BG Samples", 1, 16, 1, 1, "ViBe")
             .param_description("How many samples must match for a pixel to be classified as background")
-        .int_param("learning_rate", "Learning Rate", 1, 32, 2, 1, "ViBe")
+        .int_param("learning_rate", "Learning Rate", 1, 32, 8, 1, "ViBe")
             .param_description("Chance (1 in N) that a foreground pixel updates the background model")
         .streaming().frame_alloc()
 )
