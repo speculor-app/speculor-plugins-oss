@@ -18,7 +18,7 @@ any other plugin.
 |--------|----------|-----------|---------------|
 | **vibe_bgs** | frame → frame | ViBe background subtraction (CPU + Vulkan GPU) | Apache-2.0; LITIV-derived; **ViBe is patent-encumbered** in some jurisdictions |
 | **subsense_bgs** | frame → frame | SuBSENSE background subtraction (CPU + Vulkan GPU) | Apache-2.0; LITIV-derived |
-| **rtl_sdr** | — → table | RTL-SDR I/Q source | Apache-2.0 plugin code; links **librtlsdr (LGPL-2.1+)** at runtime |
+| **rtl_sdr** | — → signal | RTL-SDR I/Q source | Apache-2.0 plugin code; links **librtlsdr (LGPL-2.1+)** at runtime |
 
 The ViBe/SuBSENSE CPU algorithms live under `common/bgs/` (derived from the
 [LITIV Framework](https://github.com/plstcharles/litiv), © 2015 Pierre-Luc
