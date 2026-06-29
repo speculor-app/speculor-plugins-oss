@@ -68,7 +68,7 @@ struct RtlSdrState {
 
     // parameters — Gain group
     int32_t agc_enabled = 1;
-    int32_t mgc_gain = 0; // enum index into gain table
+    float   gain_db = 30.0f; // manual tuner gain in dB, snapped to a hardware step
 
     // parameters — Hardware group
     int32_t direct_sampling = 0; // 0=off, 1=I-ADC, 2=Q-ADC
@@ -113,20 +113,24 @@ static void patch_device_enum()
     }
 }
 
-static void patch_gain_enum()
+// Snap a requested dB gain to the nearest hardware-supported step and apply it.
+// The tuner only supports a discrete set of gains (queried into g_registry.gains
+// at open); we keep the user-facing value a device-independent dB float so it
+// persists cleanly, and snap here when applying.
+static void apply_manual_gain(spc::rtlsdr::RtlSdrDevice* dev, float gain_db, SpcLogContext* log)
 {
-    for (uint32_t i = 0; i < g_desc.param_count; ++i) {
-        if (std::strcmp(g_desc.params[i].name, SPC_SDR_GAIN) == 0) {
-            auto& ev = g_desc.params[i].enum_val;
-            if (g_registry.gain_count > 0) {
-                ev.count = std::min(g_registry.gain_count, static_cast<int>(SPC_PARAM_ENUM_MAX));
-                for (int j = 0; j < ev.count; ++j) {
-                    std::snprintf(ev.labels[j], SPC_PARAM_ENUM_LABEL_MAX,
-                                  "%.1f dB", static_cast<double>(g_registry.gains[j]) / 10.0);
-                }
-            }
+    int target = static_cast<int>(gain_db * 10.0f + (gain_db >= 0.0f ? 0.5f : -0.5f)); // tenths dB
+    if (g_registry.gain_count > 0) {
+        int best = g_registry.gains[0];
+        int best_d = target - best; if (best_d < 0) best_d = -best_d;
+        for (int i = 1; i < g_registry.gain_count; ++i) {
+            int d = target - g_registry.gains[i]; if (d < 0) d = -d;
+            if (d < best_d) { best_d = d; best = g_registry.gains[i]; }
         }
+        target = best;
     }
+    dev->set_tuner_gain(target);
+    if (log) SPC_LOG_INFO(log, "RTL-SDR: manual gain %.1f dB -> tuner step %.1f dB", gain_db, target / 10.0);
 }
 
 static const SpcPluginDescriptor* scan_devices(const SpcHostServices* svc)
@@ -175,8 +179,12 @@ static const SpcPluginDescriptor* get_descriptor()
             // Gain
             .bool_param(SPC_SDR_AGC_ENABLED, "AGC", true, SPC_SDR_GROUP_GAIN)
                 .param_description("Automatic gain control")
-            .enum_param(SPC_SDR_GAIN, "Manual Gain", {"0 dB"}, 0, SPC_SDR_GROUP_GAIN)
-                .param_description("Manual tuner gain (populated from device capability)")
+            // Gain as a device-independent dB float (snapped to the nearest
+            // hardware step when applied). Avoids the dynamic device-table enum,
+            // whose options don't exist until the radio runs — which clamped a
+            // saved gain index on every stopped save/load.
+            .float_param(SPC_SDR_GAIN, "Manual Gain (dB)", 0.0f, 50.0f, 30.0f, 0.1f, SPC_SDR_GROUP_GAIN)
+                .param_description("Manual tuner gain in dB, snapped to the nearest step the device supports (active when AGC is off)")
             // Hardware
             .enum_param(SPC_SDR_DIRECT_SAMPLING, "Direct Sampling", {"Off", "I-ADC", "Q-ADC"}, 0, SPC_SDR_GROUP_HARDWARE)
                 .param_description("Direct sampling mode for HF reception below 24 MHz (V3 only)")
@@ -261,14 +269,14 @@ static int set_parameter(SpcPluginInstance* inst, const char* name,
         if (live) {
             dev->set_agc(s->agc_enabled != 0);
             dev->set_tuner_gain_mode(s->agc_enabled == 0); // manual when AGC off
-            if (!s->agc_enabled && s->mgc_gain < g_registry.gain_count)
-                dev->set_tuner_gain(g_registry.gains[s->mgc_gain]);
+            if (!s->agc_enabled) apply_manual_gain(dev, s->gain_db, &s->host.cached_log);
         }
         return 0;
     }
-    if (spc::try_set_enum(name, value, SPC_SDR_GAIN, s->mgc_gain)) {
-        if (live && !s->agc_enabled && s->mgc_gain < g_registry.gain_count)
-            dev->set_tuner_gain(g_registry.gains[s->mgc_gain]);
+    if (spc::try_set_float(name, value, SPC_SDR_GAIN, s->gain_db)) {
+        if (live && !s->agc_enabled) apply_manual_gain(dev, s->gain_db, &s->host.cached_log);
+        else SPC_LOG_INFO(&s->host.cached_log, "RTL-SDR: gain %.1f dB stored, not applied (live=%d agc=%d)",
+                          static_cast<double>(s->gain_db), static_cast<int>(live), static_cast<int>(s->agc_enabled));
         return 0;
     }
     if (spc::try_set_enum(name, value, SPC_SDR_DIRECT_SAMPLING, s->direct_sampling)) {
@@ -339,19 +347,7 @@ static int get_parameter(SpcPluginInstance* inst, const char* name,
         if (no_dev) out->flags |= SPC_PARAM_FLAG_DISABLED;
         return 0;
     }
-    // dynamic gain enum — populate labels from gain table
-    if (std::strcmp(name, SPC_SDR_GAIN) == 0) {
-        out->type = SPC_PARAM_ENUM;
-        out->enum_val.value = s->mgc_gain;
-        if (g_registry.gain_count > 0) {
-            out->enum_val.count = std::min(g_registry.gain_count, static_cast<int>(SPC_PARAM_ENUM_MAX));
-            for (int i = 0; i < out->enum_val.count; ++i)
-                std::snprintf(out->enum_val.labels[i], SPC_PARAM_ENUM_LABEL_MAX,
-                              "%.1f dB", static_cast<double>(g_registry.gains[i]) / 10.0);
-        } else {
-            out->enum_val.count = 1;
-            std::strncpy(out->enum_val.labels[0], "0 dB", SPC_PARAM_ENUM_LABEL_MAX);
-        }
+    if (spc::try_get_float(name, out, SPC_SDR_GAIN, s->gain_db)) {
         if (no_dev || agc_on) out->flags |= SPC_PARAM_FLAG_DISABLED;
         return 0;
     }
@@ -413,9 +409,8 @@ static int start(SpcPluginInstance* inst)
         return -1;
     }
 
-    // query and populate gain table from opened device
+    // query the device's supported gain steps (used to snap the dB gain)
     g_registry.gain_count = s->device->query_tuner_gains(g_registry.gains, 64);
-    patch_gain_enum();
 
     // apply all parameters
     uint32_t rate = static_cast<uint32_t>(s->sample_rate);
@@ -443,8 +438,7 @@ static int start(SpcPluginInstance* inst)
     } else {
         s->device->set_agc(false);
         s->device->set_tuner_gain_mode(true); // manual
-        if (s->mgc_gain < g_registry.gain_count)
-            s->device->set_tuner_gain(g_registry.gains[s->mgc_gain]);
+        apply_manual_gain(s->device.get(), s->gain_db, &s->host.cached_log);
     }
 
     if (!s->device->start_streaming()) {
@@ -505,7 +499,7 @@ static int process(SpcPluginInstance* inst, const SpcData*, uint32_t,
         s->actual_sample_rate,
         static_cast<double>(s->center_freq),
         s->actual_sample_rate, // bandwidth ≈ sample rate for RTL-SDR
-        0.0, // gain_db — discrete steps, no single dB value
+        s->agc_enabled ? 0.0 : static_cast<double>(s->gain_db), // manual gain in dB (0 = AGC)
         s->agc_enabled != 0,
         8, // RTL-SDR native bit depth
         s->sample_count / BATCH_SIZE,
