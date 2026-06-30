@@ -4,6 +4,7 @@
 
 #include <bgs/vibe/Vibe.hpp>
 #include <opencv2/core.hpp>
+#include <opencv2/imgproc.hpp>
 
 #include <atomic>
 #include <memory>
@@ -44,6 +45,7 @@ struct VibeBgsState
     cv::Mat cached_mask;
     cv::Mat empty_mask;
     bool has_cached_mask;
+    bool mask_warned;  // logged the non-GRAY8 mask perf warning once
 
 #ifdef SPC_HAS_VULKAN
     // GPU state
@@ -104,6 +106,7 @@ static SpcPluginInstance* create_instance()
     // get_parameter and pushes descriptor values on mismatch.
     std::memset(&s->output_frame, 0, sizeof(SpcFrame));
     s->has_cached_mask = false;
+    s->mask_warned = false;
     s->vibe = std::make_unique<spclib::bgs::Vibe>(spclib::bgs::VibeParams(), false);
 #ifdef SPC_HAS_VULKAN
     s->gpu_init_attempted = false;
@@ -206,6 +209,7 @@ static int start(SpcPluginInstance* inst)
     }
     s->cached_mask = cv::Mat();
     s->has_cached_mask = false;
+    s->mask_warned = false;
 #ifdef SPC_HAS_VULKAN
     s->gpu_model_initialized = false;
     s->gpu_frame_counter = 0;
@@ -237,6 +241,58 @@ static int stop(SpcPluginInstance* inst)
     return 0;
 }
 
+// --- detection mask ---
+
+// Cache the port-1 detection mask as single-channel GRAY8 — what both the CPU
+// detector and the GPU shader expect (1 byte/pixel). GRAY8 is copied straight
+// through. A color mask is converted with a full-frame cvtColor EVERY frame,
+// which is costly on the hot path; warn once and prefer a GRAY8 mask source.
+// Any other format is ignored (also warned once). Worker-thread only — process()
+// and record_gpu() never run concurrently, so mask_warned needs no atomicity.
+// Returns true when s->cached_mask was (re)written, so record_gpu knows to flag
+// the GPU mask buffer for re-upload (the mask is otherwise uploaded once).
+static bool cache_detect_mask(VibeBgsState* s, const SpcFrame* mask_frame)
+{
+    if (!mask_frame->data || mask_frame->width == 0 || mask_frame->height == 0)
+        return false;
+
+    if (mask_frame->format == SPC_PIXEL_FORMAT_GRAY8) {
+        spc::frame_to_mat(mask_frame, CV_8UC1).copyTo(s->cached_mask);
+        s->has_cached_mask = true;
+        return true;
+    }
+
+    int code = 0;
+    switch (mask_frame->format) {
+        case SPC_PIXEL_FORMAT_RGB24:  code = cv::COLOR_RGB2GRAY;  break;
+        case SPC_PIXEL_FORMAT_BGR24:  code = cv::COLOR_BGR2GRAY;  break;
+        case SPC_PIXEL_FORMAT_RGBA32: code = cv::COLOR_RGBA2GRAY; break;
+        default:
+            if (!s->mask_warned) {
+                SPC_LOG_WARN(&s->host.cached_log,
+                    "ViBe detect mask format %d is unsupported (need GRAY8 or 8-bit "
+                    "color) — ignoring the mask input.",
+                    static_cast<int>(mask_frame->format));
+                s->mask_warned = true;
+            }
+            return false;
+    }
+
+    if (!s->mask_warned) {
+        SPC_LOG_WARN(&s->host.cached_log,
+            "ViBe detect mask is color, not GRAY8 — converting to grayscale every "
+            "frame (full-frame cvtColor, costly on the hot path). Feed a "
+            "single-channel GRAY8 mask (e.g. enable Grayscale on the mask source) "
+            "for best performance.");
+        s->mask_warned = true;
+    }
+
+    cv::cvtColor(spc::frame_to_mat(mask_frame, spc::cv_type_for_format(mask_frame->format)),
+                 s->cached_mask, code);
+    s->has_cached_mask = true;
+    return true;
+}
+
 // --- process ---
 
 static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t input_count,
@@ -263,15 +319,7 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t inpu
     if (cv_type < 0) return -1;
 
     if (input_count > 1 && inputs[1].type == SPC_DATA_FRAME && inputs[1].frame)
-    {
-        const SpcFrame* mask_frame = inputs[1].frame;
-        cv::Mat temp_mask(static_cast<int>(mask_frame->height),
-                          static_cast<int>(mask_frame->width),
-                          CV_8UC1, mask_frame->data,
-                          static_cast<size_t>(mask_frame->stride));
-        temp_mask.copyTo(s->cached_mask);
-        s->has_cached_mask = true;
-    }
+        cache_detect_mask(s, inputs[1].frame);
 
     // GPU path lives entirely in record_gpu (Phase 8). process() is the
     // CPU fallback — entered when the engine demoted GPU for this node
@@ -376,17 +424,12 @@ static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
     int cv_type = spc::cv_type_for_format(in_frame->format);
     if (cv_type < 0) return -1;
 
-    // Update cached detection mask from input port 1 (same as process()).
+    // Update cached detection mask from input port 1 (same as process()); flag
+    // the GPU buffer for re-upload only when the mask actually changed, so the
+    // pipeline doesn't re-push an identical mask every frame.
     if (rctx->input_count > 1 && rctx->inputs[1].type == SPC_DATA_FRAME && rctx->inputs[1].frame) {
-        const SpcFrame* mask_frame = rctx->inputs[1].frame;
-        if (mask_frame->format == SPC_PIXEL_FORMAT_GRAY8) {
-            cv::Mat temp_mask(static_cast<int>(mask_frame->height),
-                              static_cast<int>(mask_frame->width),
-                              CV_8UC1, mask_frame->data,
-                              static_cast<size_t>(mask_frame->stride));
-            temp_mask.copyTo(s->cached_mask);
-            s->has_cached_mask = true;
-        }
+        if (cache_detect_mask(s, rctx->inputs[1].frame))
+            s->gpu_pipeline->mark_mask_dirty();
     }
 
     auto w = static_cast<uint32_t>(in_frame->width);

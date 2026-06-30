@@ -87,6 +87,12 @@ public:
     VkDeviceSize packed_mask_bytes() const { return mask_byte_size_; }
     bool model_initialized() const { return model_initialized_; }
 
+    // Mark the (single, persistent) detect-mask device buffer as needing a
+    // re-upload. The plugin calls this only when a new mask is actually cached;
+    // record() uploads once and clears it, instead of re-pushing the identical
+    // mask every frame. prepare() also sets it on a resolution change.
+    void mark_mask_dirty() { mask_upload_needed_ = true; }
+
     void destroy(VulkanContext& ctx);
 
     bool initialized() const { return initialized_; }
@@ -155,6 +161,7 @@ private:
     bool use_wide_layout_ = false;
     bool initialized_ = false;
     bool model_initialized_ = false;
+    bool mask_upload_needed_ = false;  // detect mask changed → re-upload once
 
     // cached buffer sizes
     VkDeviceSize frame_byte_size_ = 0;   // input frame in bytes

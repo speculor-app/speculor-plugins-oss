@@ -90,6 +90,11 @@ public:
     bool initialized() const { return initialized_; }
     bool model_ready() const { return model_initialized_; }
 
+    // Mark the (single, persistent) detect-mask device buffer as needing a
+    // re-upload (see vibe). The plugin calls this only when a new mask is cached;
+    // record() uploads once and clears it. prepare() sets it on a resolution change.
+    void mark_mask_dirty() { mask_upload_needed_ = true; }
+
 private:
     // Re-point the per-frame ring bindings 0 (input) and 4 (output). `out` ==
     // VK_NULL_HANDLE leaves binding 4 untouched (the init pass doesn't write
@@ -146,6 +151,7 @@ private:
     bool use_wide_layout_ = false;
     bool initialized_ = false;
     bool model_initialized_ = false;
+    bool mask_upload_needed_ = false;  // detect mask changed → re-upload once
 };
 
 } // namespace spc::gpu
