@@ -5,6 +5,7 @@
 #include <bgs/subsense/SuBSENSE.hpp>
 
 #include <opencv2/core.hpp>
+#include <opencv2/imgproc.hpp>
 
 #include <atomic>
 #include <memory>
@@ -46,6 +47,7 @@ struct SubsenseBgsState
     cv::Mat cached_mask;
     cv::Mat empty_mask;
     bool has_cached_mask;
+    bool mask_warned;  // logged the non-GRAY8 mask perf warning once
 
 #ifdef SPC_HAS_VULKAN
     // GPU state
@@ -107,6 +109,7 @@ static SpcPluginInstance* create_instance()
     auto* s = new SubsenseBgsState{};
     std::memset(&s->output_frame, 0, sizeof(SpcFrame));
     s->has_cached_mask = false;
+    s->mask_warned = false;
     s->subsense = std::make_unique<spclib::bgs::SuBSENSE>(spclib::bgs::SuBSENSEParams());
 #ifdef SPC_HAS_VULKAN
     s->gpu_init_attempted = false;
@@ -208,6 +211,7 @@ static int start(SpcPluginInstance* inst)
     }
     s->cached_mask = cv::Mat();
     s->has_cached_mask = false;
+    s->mask_warned = false;
 #ifdef SPC_HAS_VULKAN
     s->gpu_init_attempted = false;
     s->gpu_available = false;
@@ -234,6 +238,55 @@ static int stop(SpcPluginInstance* inst)
 #endif
     SPC_LOG_INFO(&s->host.cached_log, "SuBSENSE BGS stopped");
     return 0;
+}
+
+// --- detection mask ---
+
+// Cache the port-1 detection mask as single-channel GRAY8 — what both the CPU
+// detector and the GPU shader expect (1 byte/pixel). GRAY8 is copied straight
+// through. A color mask is converted with a full-frame cvtColor EVERY frame,
+// which is costly on the hot path; warn once and prefer a GRAY8 mask source.
+// Any other format is ignored (also warned once). Worker-thread only — process()
+// and record_gpu() never run concurrently, so mask_warned needs no atomicity.
+static void cache_detect_mask(SubsenseBgsState* s, const SpcFrame* mask_frame)
+{
+    if (!mask_frame->data || mask_frame->width == 0 || mask_frame->height == 0)
+        return;
+
+    if (mask_frame->format == SPC_PIXEL_FORMAT_GRAY8) {
+        spc::frame_to_mat(mask_frame, CV_8UC1).copyTo(s->cached_mask);
+        s->has_cached_mask = true;
+        return;
+    }
+
+    int code = 0;
+    switch (mask_frame->format) {
+        case SPC_PIXEL_FORMAT_RGB24:  code = cv::COLOR_RGB2GRAY;  break;
+        case SPC_PIXEL_FORMAT_BGR24:  code = cv::COLOR_BGR2GRAY;  break;
+        case SPC_PIXEL_FORMAT_RGBA32: code = cv::COLOR_RGBA2GRAY; break;
+        default:
+            if (!s->mask_warned) {
+                SPC_LOG_WARN(&s->host.cached_log,
+                    "SuBSENSE detect mask format %d is unsupported (need GRAY8 or "
+                    "8-bit color) — ignoring the mask input.",
+                    static_cast<int>(mask_frame->format));
+                s->mask_warned = true;
+            }
+            return;
+    }
+
+    if (!s->mask_warned) {
+        SPC_LOG_WARN(&s->host.cached_log,
+            "SuBSENSE detect mask is color, not GRAY8 — converting to grayscale "
+            "every frame (full-frame cvtColor, costly on the hot path). Feed a "
+            "single-channel GRAY8 mask (e.g. enable Grayscale on the mask source) "
+            "for best performance.");
+        s->mask_warned = true;
+    }
+
+    cv::cvtColor(spc::frame_to_mat(mask_frame, spc::cv_type_for_format(mask_frame->format)),
+                 s->cached_mask, code);
+    s->has_cached_mask = true;
 }
 
 // --- process ---
@@ -265,15 +318,7 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t inpu
     if (depth != CV_8U) return -1;
 
     if (input_count > 1 && inputs[1].type == SPC_DATA_FRAME && inputs[1].frame)
-    {
-        const SpcFrame* mask_frame = inputs[1].frame;
-        cv::Mat temp_mask(static_cast<int>(mask_frame->height),
-                         static_cast<int>(mask_frame->width),
-                         CV_8UC1, mask_frame->data,
-                         static_cast<size_t>(mask_frame->stride));
-        temp_mask.copyTo(s->cached_mask);
-        s->has_cached_mask = true;
-    }
+        cache_detect_mask(s, inputs[1].frame);
 
     // GPU path lives entirely in record_gpu (Phase 8). process() is the
     // CPU fallback — entered when the engine demoted GPU for this node
@@ -376,17 +421,8 @@ static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
     int cv_type = spc::cv_type_for_format(in_frame->format);
     if (cv_type < 0) return -1;
 
-    if (rctx->input_count > 1 && rctx->inputs[1].type == SPC_DATA_FRAME && rctx->inputs[1].frame) {
-        const SpcFrame* mask_frame = rctx->inputs[1].frame;
-        if (mask_frame->format == SPC_PIXEL_FORMAT_GRAY8) {
-            cv::Mat temp_mask(static_cast<int>(mask_frame->height),
-                              static_cast<int>(mask_frame->width),
-                              CV_8UC1, mask_frame->data,
-                              static_cast<size_t>(mask_frame->stride));
-            temp_mask.copyTo(s->cached_mask);
-            s->has_cached_mask = true;
-        }
-    }
+    if (rctx->input_count > 1 && rctx->inputs[1].type == SPC_DATA_FRAME && rctx->inputs[1].frame)
+        cache_detect_mask(s, rctx->inputs[1].frame);
 
     auto w = static_cast<uint32_t>(in_frame->width);
     auto h = static_cast<uint32_t>(in_frame->height);
