@@ -96,6 +96,7 @@ bool SubsenseGpuPipeline::prepare(VulkanContext& ctx, uint32_t width, uint32_t h
     num_channels_ = num_channels;
     bg_samples_ = bg_samples;
     model_initialized_ = false;
+    mask_upload_needed_ = true;  // mask buffer realloc'd → re-upload on next record
     pixel_count_ = width * height;
     use_wide_layout_ = false;
 
@@ -268,8 +269,10 @@ bool SubsenseGpuPipeline::record(VulkanContext& ctx, VkCommandBuffer cmd,
     VkBuffer in_buf = (gpu_input != VK_NULL_HANDLE) ? gpu_input : in_device;
     if (in_buf == VK_NULL_HANDLE) return false;
 
-    bool has_mask = (detect_mask != nullptr && params.has_mask != 0);
-    if (has_mask) {
+    // Only refresh the persistent mask device buffer when it actually changed
+    // (the shader still applies it every frame via params.has_mask).
+    const bool do_upload = (detect_mask != nullptr && params.has_mask != 0) && mask_upload_needed_;
+    if (do_upload) {
         auto* mask_staging = static_cast<uint8_t*>(staging_mask_.mapped);
         if (mask_stride == static_cast<int>(width_)) {
             std::memcpy(mask_staging, detect_mask, static_cast<size_t>(width_) * height_);
@@ -292,8 +295,10 @@ bool SubsenseGpuPipeline::record(VulkanContext& ctx, VkCommandBuffer cmd,
         StagingBuffer in_stg{}; in_stg.buffer = in_staging;
         cmd_upload_input(in_stg, in_device, frame_bytes_);
     }
-    if (has_mask)
+    if (do_upload) {
         cmd_upload_input(staging_mask_, bufs_[3], mask_bytes_);
+        mask_upload_needed_ = false;
+    }
     barrier_transfer_to_compute();
 
     uint32_t gx = (params.width + 15) / 16;

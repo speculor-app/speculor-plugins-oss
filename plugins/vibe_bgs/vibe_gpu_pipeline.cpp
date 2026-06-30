@@ -102,6 +102,7 @@ bool VibeGpuPipeline::prepare(VulkanContext& ctx, uint32_t width, uint32_t heigh
     bytes_per_channel_ = bytes_per_channel;
     bg_samples_ = bg_samples;
     model_initialized_ = false;
+    mask_upload_needed_ = true;  // mask buffer realloc'd → re-upload on next record
     pixel_count_ = width * height;
 
     // compute sizes
@@ -282,8 +283,13 @@ bool VibeGpuPipeline::record(VulkanContext& ctx, VkCommandBuffer cmd,
     VkBuffer in_buf = (gpu_input != VK_NULL_HANDLE) ? gpu_input : in_device;
     if (in_buf == VK_NULL_HANDLE) return false;
 
-    bool has_mask = (detect_mask != nullptr && mask_size > 0);
-    if (has_mask)
+    // has_mask = the shader should APPLY the mask (sticky once a mask is set).
+    // upload_mask = the device buffer actually needs refreshing — the mask is a
+    // single, persistent buffer, so we only re-push it when it changed (set via
+    // mark_mask_dirty / a resolution change), not every frame.
+    const bool has_mask = (detect_mask != nullptr && mask_size > 0);
+    const bool upload_mask = has_mask && mask_upload_needed_;
+    if (upload_mask)
         std::memcpy(staging_mask_.mapped, detect_mask, mask_size);
 
     // Re-point bindings 0 (input ring slot) and 2 (output ring slot) at this
@@ -303,9 +309,10 @@ bool VibeGpuPipeline::record(VulkanContext& ctx, VkCommandBuffer cmd,
         cmd_upload_input(in_stg, in_device, frame_size);
         recorded_transfer = true;
     }
-    if (has_mask) {
+    if (upload_mask) {
         cmd_upload_input(staging_mask_, detect_mask_buf_, mask_size);
         recorded_transfer = true;
+        mask_upload_needed_ = false;
     }
     if (recorded_transfer)
         barrier_transfer_to_compute();

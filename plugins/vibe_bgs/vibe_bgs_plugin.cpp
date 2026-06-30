@@ -249,15 +249,17 @@ static int stop(SpcPluginInstance* inst)
 // which is costly on the hot path; warn once and prefer a GRAY8 mask source.
 // Any other format is ignored (also warned once). Worker-thread only — process()
 // and record_gpu() never run concurrently, so mask_warned needs no atomicity.
-static void cache_detect_mask(VibeBgsState* s, const SpcFrame* mask_frame)
+// Returns true when s->cached_mask was (re)written, so record_gpu knows to flag
+// the GPU mask buffer for re-upload (the mask is otherwise uploaded once).
+static bool cache_detect_mask(VibeBgsState* s, const SpcFrame* mask_frame)
 {
     if (!mask_frame->data || mask_frame->width == 0 || mask_frame->height == 0)
-        return;
+        return false;
 
     if (mask_frame->format == SPC_PIXEL_FORMAT_GRAY8) {
         spc::frame_to_mat(mask_frame, CV_8UC1).copyTo(s->cached_mask);
         s->has_cached_mask = true;
-        return;
+        return true;
     }
 
     int code = 0;
@@ -273,7 +275,7 @@ static void cache_detect_mask(VibeBgsState* s, const SpcFrame* mask_frame)
                     static_cast<int>(mask_frame->format));
                 s->mask_warned = true;
             }
-            return;
+            return false;
     }
 
     if (!s->mask_warned) {
@@ -288,6 +290,7 @@ static void cache_detect_mask(VibeBgsState* s, const SpcFrame* mask_frame)
     cv::cvtColor(spc::frame_to_mat(mask_frame, spc::cv_type_for_format(mask_frame->format)),
                  s->cached_mask, code);
     s->has_cached_mask = true;
+    return true;
 }
 
 // --- process ---
@@ -421,9 +424,13 @@ static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
     int cv_type = spc::cv_type_for_format(in_frame->format);
     if (cv_type < 0) return -1;
 
-    // Update cached detection mask from input port 1 (same as process()).
-    if (rctx->input_count > 1 && rctx->inputs[1].type == SPC_DATA_FRAME && rctx->inputs[1].frame)
-        cache_detect_mask(s, rctx->inputs[1].frame);
+    // Update cached detection mask from input port 1 (same as process()); flag
+    // the GPU buffer for re-upload only when the mask actually changed, so the
+    // pipeline doesn't re-push an identical mask every frame.
+    if (rctx->input_count > 1 && rctx->inputs[1].type == SPC_DATA_FRAME && rctx->inputs[1].frame) {
+        if (cache_detect_mask(s, rctx->inputs[1].frame))
+            s->gpu_pipeline->mark_mask_dirty();
+    }
 
     auto w = static_cast<uint32_t>(in_frame->width);
     auto h = static_cast<uint32_t>(in_frame->height);
