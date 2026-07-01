@@ -6,6 +6,7 @@
 #ifdef _WIN32
 #include <io.h>
 #include <fcntl.h>
+#include <excpt.h>  // EXCEPTION_EXECUTE_HANDLER for the bias-T teardown guard
 #else
 #include <unistd.h>
 #include <fcntl.h>
@@ -167,10 +168,33 @@ bool RtlSdrDevice::open(uint32_t device_index)
     return true;
 }
 
+// Best-effort "disable bias-T before releasing the device" — folded into
+// close() so every teardown path (stop, re-open, destructor) gets it. The
+// librtlsdr GPIO write is a USB control transfer that has been seen to fault
+// *inside* the driver during teardown under rapid open/close cycling; left
+// unguarded (it used to run in the plugin's stop() before close()), that SEH
+// is caught by the host and abandons stop(), so Close() never runs and the
+// leaked open handle wedges the next rtlsdr_open(). Contain it here in a frame
+// with no unwind objects so close() always reaches Close(dev_).
+void RtlSdrDevice::disable_bias_tee_safe()
+{
+    if (!dev_ || !api_.SetBiasTee) return;
+#ifdef _WIN32
+    __try {
+        api_.SetBiasTee(dev_, 0);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        // GPIO write faulted mid-teardown — swallow so Close() still runs
+    }
+#else
+    api_.SetBiasTee(dev_, 0);
+#endif
+}
+
 void RtlSdrDevice::close()
 {
     if (!dev_) return;
     stop_streaming();
+    disable_bias_tee_safe();  // must not skip the Close() below on a fault
     api_.Close(dev_);
     SPC_LOG_INFO(log_, "RTL-SDR device closed");
     dev_ = nullptr;

@@ -457,8 +457,9 @@ static int stop(SpcPluginInstance* inst)
     auto* s = state(inst);
     s->streaming = false;
     if (s->device) {
-        s->device->stop_streaming();
-        s->device->set_bias_tee(false); // safety: disable bias-T on stop
+        // close() disables bias-T (guarded) before releasing the device, so a
+        // librtlsdr GPIO-write fault under rapid start/stop can't skip the
+        // release and wedge the next open.
         s->device->close();
         s->device.reset();
     }
