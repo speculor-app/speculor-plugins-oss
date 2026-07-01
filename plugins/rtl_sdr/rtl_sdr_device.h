@@ -147,6 +147,10 @@ private:
     // thread function that runs rtlsdr_read_async (blocks until cancel)
     void read_thread_fn();
 
+    // best-effort bias-T disable during close(), contained against a librtlsdr
+    // GPIO-write fault so it can never skip the following device release.
+    void disable_bias_tee_safe();
+
     SpcLogContext* log_;
     rtlsdr_dev_t* dev_ = nullptr;
     SpcRingBuffer* ring_ = nullptr;
