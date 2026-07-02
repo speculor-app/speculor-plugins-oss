@@ -21,12 +21,18 @@
 // is worker-owned — its setters must run on the worker from a snapshot, not
 // from set_parameter, so the CPU process() applies the snapshot on a dirty flag
 // and record_gpu reads the snapshot directly.
+// Defaults retuned 2026-07 end-to-end (ViBe→dual_morph→blob_detect→sort_tracker
+// against drone-sim GT on real all-sky footage, tracker at v0.4.0): the earlier
+// threshold 35 / learning_rate 8 point was compensating for the pre-fix tracker,
+// which turned extra detections into ID churn. With matching fixed, higher
+// sensitivity + slower background absorption wins on recall, precision, false
+// tracks, and ID stability simultaneously.
 struct Params
 {
-    int32_t threshold = 35;
+    int32_t threshold = 27;
     int32_t bg_samples = 16;
     int32_t required_bg_samples = 1;
-    int32_t learning_rate = 8;
+    int32_t learning_rate = 16;
 };
 
 // internal state
@@ -66,7 +72,7 @@ SPC_PLUGIN_HOST_SERVICES(VibeBgsState, host)
 
 SPC_PLUGIN_DESCRIPTOR(
     spc::DescriptorBuilder("vibe_bgs", "ViBe BGS", "Analysis/Motion")
-        .author("Speculor").version("0.2.0")
+        .author("Speculor").version("0.3.0")
         .description("ViBe background subtraction — outputs foreground mask")
         .maturity(SPC_MATURITY_STABLE)
         .tags({"image", "tracking", "surveillance"})
@@ -75,14 +81,15 @@ SPC_PLUGIN_DESCRIPTOR(
         .output("mask_out", "FG Mask", SPC_DATA_FRAME)
         .output("image_out", "Image", SPC_DATA_FRAME)
         .gpu_compute()
-        .int_param("threshold", "Threshold", 1, 255, 35, 1, "ViBe")
+        .int_param("threshold", "Threshold", 1, 255, 27, 1, "ViBe")
             .param_description("Pixel intensity difference to classify as foreground")
         .int_param("bg_samples", "BG Samples", 2, 64, 16, 2, "ViBe")
             .param_description("Number of background samples stored per pixel")
         .int_param("required_bg_samples", "Required BG Samples", 1, 16, 1, 1, "ViBe")
             .param_description("How many samples must match for a pixel to be classified as background")
-        .int_param("learning_rate", "Learning Rate", 1, 32, 8, 1, "ViBe")
-            .param_description("Chance (1 in N) that a foreground pixel updates the background model")
+        .int_param("learning_rate", "Learning Rate", 1, 32, 16, 1, "ViBe")
+            .param_description("Chance (1 in N) that a foreground pixel updates the background model — "
+                               "higher = slower absorption, keeps slow/hovering movers foreground longer")
         .streaming().frame_alloc()
 )
 
