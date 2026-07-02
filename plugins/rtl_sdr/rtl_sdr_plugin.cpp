@@ -1,5 +1,5 @@
 #include "rtl_sdr_device.h"
-#include "winradio_common.h"
+#include <speculor/sdr_source_helpers.h>
 #include <speculor/sdr_params.h>
 #include <spc_clock.h>
 
@@ -11,8 +11,8 @@
 // ── device registry ─────────────────────────────────────────────────
 
 static struct RtlSdrRegistry {
-    spc::winradio::DeviceEntry devices[spc::winradio::MAX_DEVICES];
-    uint32_t device_indices[spc::winradio::MAX_DEVICES]; // map enum index to hw index
+    spc::sdr::DeviceEntry devices[spc::sdr::MAX_DEVICES];
+    uint32_t device_indices[spc::sdr::MAX_DEVICES]; // map enum index to hw index
     int count = 0;
 
     // gain table populated per-device after open
@@ -38,7 +38,7 @@ static struct RtlSdrRegistry {
 
         auto hw = spc::rtlsdr::RtlSdrDevice::enumerate();
         for (const auto& dev : hw) {
-            if (count >= spc::winradio::MAX_DEVICES) break;
+            if (count >= spc::sdr::MAX_DEVICES) break;
             devices[count].index = static_cast<int>(dev.index);
             std::snprintf(devices[count].label, SPC_PARAM_ENUM_LABEL_MAX,
                           "%s [%s]", dev.name, dev.serial);
@@ -218,7 +218,7 @@ static SpcPluginInstance* create_instance()
     s->batch_buffer.resize(8192 * 2);
 
     auto* desc = get_descriptor();
-    spc::winradio::init_iq_table(s->output_table, &desc->ports[0].schema);
+    spc::sdr::init_iq_table(s->output_table, &desc->ports[0].schema);
 
     return reinterpret_cast<SpcPluginInstance*>(s);
 }
@@ -308,7 +308,7 @@ static int set_parameter(SpcPluginInstance* inst, const char* name,
         return 0;
     }
 
-    return -1;
+    return SPC_ERR_NOT_FOUND;
 }
 
 static int get_parameter(SpcPluginInstance* inst, const char* name,
@@ -382,7 +382,7 @@ static int get_parameter(SpcPluginInstance* inst, const char* name,
         return 0;
     }
 
-    return -1;
+    return SPC_ERR_NOT_FOUND;
 }
 
 // ── streaming ───────────────────────────────────────────────────────
@@ -495,7 +495,7 @@ static int process(SpcPluginInstance* inst, const SpcData*, uint32_t,
 
     auto ts = spc::clock::now_utc_ns(s->host);
 
-    spc::winradio::set_iq_metadata(
+    spc::sdr::set_iq_metadata(
         s->output_table,
         s->actual_sample_rate,
         static_cast<double>(s->center_freq),

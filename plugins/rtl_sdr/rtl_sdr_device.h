@@ -1,5 +1,5 @@
 #pragma once
-#include "winradio_common.h"
+#include <speculor/sdr_source_helpers.h>
 #include <speculor/plugin_log.h>
 #include <speculor/ring_buffer.h>
 
@@ -159,7 +159,7 @@ private:
     bool is_v4_ = false;
 
     static RtlSdrApi api_;
-    static spc::winradio::LibHandle dll_handle_;
+    static spc::sdr::LibHandle dll_handle_;
 };
 
 } // namespace spc::rtlsdr

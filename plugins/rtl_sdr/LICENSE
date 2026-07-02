@@ -1,9 +1,9 @@
 rtl_sdr — license
 =================
 
-The plugin's own source (rtl_sdr_plugin.cpp, rtl_sdr_device.{h,cpp},
-winradio_common.h) is licensed under the Apache License, Version 2.0. The full
-license text is in the repository root `LICENSE`.
+The plugin's own source (rtl_sdr_plugin.cpp, rtl_sdr_device.{h,cpp}) is
+licensed under the Apache License, Version 2.0. The full license text is in
+the repository root `LICENSE`.
 
 Linked third-party library
 --------------------------

@@ -48,7 +48,7 @@ namespace spc::rtlsdr {
 static constexpr uint32_t RING_CAPACITY = 2097152; // ~1 second at 2 MHz
 
 RtlSdrApi RtlSdrDevice::api_{};
-spc::winradio::LibHandle RtlSdrDevice::dll_handle_ = nullptr;
+spc::sdr::LibHandle RtlSdrDevice::dll_handle_ = nullptr;
 
 // ── API loading ─────────────────────────────────────────────────────
 
@@ -57,46 +57,46 @@ bool RtlSdrDevice::load_api()
     if (api_.loaded) return true;
 
 #ifdef _WIN32
-    dll_handle_ = spc::winradio::lib_open("rtlsdr.dll");
+    dll_handle_ = spc::sdr::lib_open("rtlsdr.dll");
 #else
-    dll_handle_ = spc::winradio::lib_open("librtlsdr.so.0");
+    dll_handle_ = spc::sdr::lib_open("librtlsdr.so.0");
     if (!dll_handle_)
-        dll_handle_ = spc::winradio::lib_open("librtlsdr.so");
+        dll_handle_ = spc::sdr::lib_open("librtlsdr.so");
 #endif
     if (!dll_handle_) return false;
 
     bool ok = true;
-    ok &= spc::winradio::load_fn(dll_handle_, "rtlsdr_get_device_count",       api_.GetDeviceCount);
-    ok &= spc::winradio::load_fn(dll_handle_, "rtlsdr_get_device_name",        api_.GetDeviceName);
-    ok &= spc::winradio::load_fn(dll_handle_, "rtlsdr_get_device_usb_strings", api_.GetDeviceUsbStrings);
-    ok &= spc::winradio::load_fn(dll_handle_, "rtlsdr_open",                   api_.Open);
-    ok &= spc::winradio::load_fn(dll_handle_, "rtlsdr_close",                  api_.Close);
-    ok &= spc::winradio::load_fn(dll_handle_, "rtlsdr_set_center_freq",        api_.SetCenterFreq);
-    ok &= spc::winradio::load_fn(dll_handle_, "rtlsdr_get_center_freq",        api_.GetCenterFreq);
-    ok &= spc::winradio::load_fn(dll_handle_, "rtlsdr_set_sample_rate",        api_.SetSampleRate);
-    ok &= spc::winradio::load_fn(dll_handle_, "rtlsdr_get_sample_rate",        api_.GetSampleRate);
-    ok &= spc::winradio::load_fn(dll_handle_, "rtlsdr_set_tuner_gain_mode",    api_.SetTunerGainMode);
-    ok &= spc::winradio::load_fn(dll_handle_, "rtlsdr_set_tuner_gain",         api_.SetTunerGain);
-    ok &= spc::winradio::load_fn(dll_handle_, "rtlsdr_get_tuner_gains",        api_.GetTunerGains);
-    ok &= spc::winradio::load_fn(dll_handle_, "rtlsdr_set_agc_mode",           api_.SetAgcMode);
-    ok &= spc::winradio::load_fn(dll_handle_, "rtlsdr_reset_buffer",           api_.ResetBuffer);
-    ok &= spc::winradio::load_fn(dll_handle_, "rtlsdr_read_async",             api_.ReadAsync);
-    ok &= spc::winradio::load_fn(dll_handle_, "rtlsdr_cancel_async",           api_.CancelAsync);
+    ok &= spc::sdr::load_fn(dll_handle_, "rtlsdr_get_device_count",       api_.GetDeviceCount);
+    ok &= spc::sdr::load_fn(dll_handle_, "rtlsdr_get_device_name",        api_.GetDeviceName);
+    ok &= spc::sdr::load_fn(dll_handle_, "rtlsdr_get_device_usb_strings", api_.GetDeviceUsbStrings);
+    ok &= spc::sdr::load_fn(dll_handle_, "rtlsdr_open",                   api_.Open);
+    ok &= spc::sdr::load_fn(dll_handle_, "rtlsdr_close",                  api_.Close);
+    ok &= spc::sdr::load_fn(dll_handle_, "rtlsdr_set_center_freq",        api_.SetCenterFreq);
+    ok &= spc::sdr::load_fn(dll_handle_, "rtlsdr_get_center_freq",        api_.GetCenterFreq);
+    ok &= spc::sdr::load_fn(dll_handle_, "rtlsdr_set_sample_rate",        api_.SetSampleRate);
+    ok &= spc::sdr::load_fn(dll_handle_, "rtlsdr_get_sample_rate",        api_.GetSampleRate);
+    ok &= spc::sdr::load_fn(dll_handle_, "rtlsdr_set_tuner_gain_mode",    api_.SetTunerGainMode);
+    ok &= spc::sdr::load_fn(dll_handle_, "rtlsdr_set_tuner_gain",         api_.SetTunerGain);
+    ok &= spc::sdr::load_fn(dll_handle_, "rtlsdr_get_tuner_gains",        api_.GetTunerGains);
+    ok &= spc::sdr::load_fn(dll_handle_, "rtlsdr_set_agc_mode",           api_.SetAgcMode);
+    ok &= spc::sdr::load_fn(dll_handle_, "rtlsdr_reset_buffer",           api_.ResetBuffer);
+    ok &= spc::sdr::load_fn(dll_handle_, "rtlsdr_read_async",             api_.ReadAsync);
+    ok &= spc::sdr::load_fn(dll_handle_, "rtlsdr_cancel_async",           api_.CancelAsync);
 
     // optional functions (don't fail if missing — older library versions)
-    spc::winradio::load_fn(dll_handle_, "rtlsdr_set_tuner_bandwidth",  api_.SetTunerBandwidth);
-    spc::winradio::load_fn(dll_handle_, "rtlsdr_set_direct_sampling",  api_.SetDirectSampling);
-    spc::winradio::load_fn(dll_handle_, "rtlsdr_set_offset_tuning",    api_.SetOffsetTuning);
-    spc::winradio::load_fn(dll_handle_, "rtlsdr_set_bias_tee",         api_.SetBiasTee);
-    spc::winradio::load_fn(dll_handle_, "rtlsdr_set_bias_tee_gpio",    api_.SetBiasTeeGpio);
-    spc::winradio::load_fn(dll_handle_, "rtlsdr_set_freq_correction",  api_.SetFreqCorrection);
-    spc::winradio::load_fn(dll_handle_, "rtlsdr_set_testmode",         api_.SetTestmode);
-    spc::winradio::load_fn(dll_handle_, "rtlsdr_set_tuner_if_gain",    api_.SetTunerIfGain);
-    spc::winradio::load_fn(dll_handle_, "rtlsdr_get_tuner_type",       api_.GetTunerType);
-    spc::winradio::load_fn(dll_handle_, "rtlsdr_set_dithering",       api_.SetDithering);
+    spc::sdr::load_fn(dll_handle_, "rtlsdr_set_tuner_bandwidth",  api_.SetTunerBandwidth);
+    spc::sdr::load_fn(dll_handle_, "rtlsdr_set_direct_sampling",  api_.SetDirectSampling);
+    spc::sdr::load_fn(dll_handle_, "rtlsdr_set_offset_tuning",    api_.SetOffsetTuning);
+    spc::sdr::load_fn(dll_handle_, "rtlsdr_set_bias_tee",         api_.SetBiasTee);
+    spc::sdr::load_fn(dll_handle_, "rtlsdr_set_bias_tee_gpio",    api_.SetBiasTeeGpio);
+    spc::sdr::load_fn(dll_handle_, "rtlsdr_set_freq_correction",  api_.SetFreqCorrection);
+    spc::sdr::load_fn(dll_handle_, "rtlsdr_set_testmode",         api_.SetTestmode);
+    spc::sdr::load_fn(dll_handle_, "rtlsdr_set_tuner_if_gain",    api_.SetTunerIfGain);
+    spc::sdr::load_fn(dll_handle_, "rtlsdr_get_tuner_type",       api_.GetTunerType);
+    spc::sdr::load_fn(dll_handle_, "rtlsdr_set_dithering",       api_.SetDithering);
 
     if (!ok) {
-        spc::winradio::lib_close(dll_handle_);
+        spc::sdr::lib_close(dll_handle_);
         dll_handle_ = nullptr;
         api_ = {};
         return false;
