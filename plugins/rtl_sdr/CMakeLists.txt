@@ -13,5 +13,3 @@ endif()
 
 spc_add_plugin(rtl_sdr SOURCES rtl_sdr_plugin.cpp rtl_sdr_device.cpp)
 target_include_directories(rtl_sdr PRIVATE ${RtlSdr_INCLUDE_DIR})
-# winradio_common.h is vendored alongside the sources (header-only) and resolved
-# same-dir by the #include "winradio_common.h" in the plugin/device files.
