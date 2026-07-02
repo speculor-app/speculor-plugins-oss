@@ -130,7 +130,6 @@ static void apply_manual_gain(spc::rtlsdr::RtlSdrDevice* dev, float gain_db, Spc
         target = best;
     }
     dev->set_tuner_gain(target);
-    if (log) SPC_LOG_INFO(log, "RTL-SDR: manual gain %.1f dB -> tuner step %.1f dB", gain_db, target / 10.0);
 }
 
 static const SpcPluginDescriptor* scan_devices(const SpcHostServices* svc)
