@@ -51,7 +51,8 @@ struct VibeBgsState
     cv::Mat cached_mask;
     cv::Mat empty_mask;
     bool has_cached_mask;
-    bool mask_warned;  // logged the non-GRAY8 mask perf warning once
+    bool mask_warned;      // logged the non-GRAY8 mask perf warning once
+    bool mask_dim_warned;  // logged the mask/frame dimension-mismatch warning once
 
 #ifdef SPC_HAS_VULKAN
     // GPU state
@@ -114,6 +115,7 @@ static SpcPluginInstance* create_instance()
     std::memset(&s->output_frame, 0, sizeof(SpcFrame));
     s->has_cached_mask = false;
     s->mask_warned = false;
+    s->mask_dim_warned = false;
     s->vibe = std::make_unique<spclib::bgs::Vibe>(spclib::bgs::VibeParams(), false);
 #ifdef SPC_HAS_VULKAN
     s->gpu_init_attempted = false;
@@ -217,6 +219,7 @@ static int start(SpcPluginInstance* inst)
     s->cached_mask = cv::Mat();
     s->has_cached_mask = false;
     s->mask_warned = false;
+    s->mask_dim_warned = false;
 #ifdef SPC_HAS_VULKAN
     s->gpu_model_initialized = false;
     s->gpu_frame_counter = 0;
@@ -300,6 +303,27 @@ static bool cache_detect_mask(VibeBgsState* s, const SpcFrame* mask_frame)
     return true;
 }
 
+// The cached mask is only usable when it matches the frame dimensions: both
+// the CPU detector and the GPU staging upload index it with image-sized
+// offsets, so a mismatched mask (e.g. sized for a different camera) would be
+// read out of bounds. Checked per frame — the image size can change
+// mid-stream. Warn once and ignore the mask.
+static bool mask_usable(VibeBgsState* s, uint32_t w, uint32_t h)
+{
+    if (!s->has_cached_mask) return false;
+    if (s->cached_mask.cols == static_cast<int>(w) &&
+        s->cached_mask.rows == static_cast<int>(h))
+        return true;
+    if (!s->mask_dim_warned) {
+        SPC_LOG_WARN(&s->host.cached_log,
+            "ViBe detect mask is %dx%d but frames are %ux%u — ignoring the "
+            "mask (size it to the camera resolution).",
+            s->cached_mask.cols, s->cached_mask.rows, w, h);
+        s->mask_dim_warned = true;
+    }
+    return false;
+}
+
 // --- process ---
 
 static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t input_count,
@@ -343,6 +367,7 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t inpu
     // acquire pool frame and have ViBe write directly into it
     auto w = static_cast<uint32_t>(in_frame->width);
     auto h = static_cast<uint32_t>(in_frame->height);
+    const bool use_mask = mask_usable(s, w, h);
 
     SpcFrame* out = s->host.acquire_frame(0, w, h, SPC_PIXEL_FORMAT_GRAY8);
     if (out)
@@ -350,7 +375,7 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t inpu
         // wrap pool buffer as Image — ViBe writes directly, no copy
         s->fg_mask = cv::Mat(static_cast<int>(h), static_cast<int>(w), CV_8UC1, out->data);
         s->vibe->apply(s->input_image, s->fg_mask,
-                       s->has_cached_mask ? s->cached_mask : s->empty_mask);
+                       use_mask ? s->cached_mask : s->empty_mask);
         out->frame_number = in_frame->frame_number;
         out->timestamp_ns = in_frame->timestamp_ns;
         outputs[0].type = SPC_DATA_FRAME;
@@ -362,7 +387,7 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t inpu
 
     // fallback: no allocator — use internal buffer
     s->vibe->apply(s->input_image, s->fg_mask,
-                   s->has_cached_mask ? s->cached_mask : s->empty_mask);
+                   use_mask ? s->cached_mask : s->empty_mask);
     const cv::Mat& fg_mat = s->fg_mask;
     spc::mat_to_frame(fg_mat, &s->output_frame, SPC_PIXEL_FORMAT_GRAY8,
                      in_frame->frame_number, in_frame->timestamp_ns);
@@ -549,8 +574,9 @@ static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
         return 0;
     }
 
-    const uint8_t* det_mask = s->has_cached_mask ? s->cached_mask.data : nullptr;
-    uint32_t det_mask_size  = s->has_cached_mask ? mask_size : 0;
+    const bool use_mask = mask_usable(s, w, h);
+    const uint8_t* det_mask = use_mask ? s->cached_mask.data : nullptr;
+    uint32_t det_mask_size  = use_mask ? mask_size : 0;
 
     if (!s->gpu_pipeline->record(*s->gpu_ctx, cmd,
                                   in_device, in_staging, frame_size,

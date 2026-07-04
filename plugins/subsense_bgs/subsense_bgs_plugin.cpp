@@ -47,7 +47,8 @@ struct SubsenseBgsState
     cv::Mat cached_mask;
     cv::Mat empty_mask;
     bool has_cached_mask;
-    bool mask_warned;  // logged the non-GRAY8 mask perf warning once
+    bool mask_warned;      // logged the non-GRAY8 mask perf warning once
+    bool mask_dim_warned;  // logged the mask/frame dimension-mismatch warning once
 
 #ifdef SPC_HAS_VULKAN
     // GPU state
@@ -110,6 +111,7 @@ static SpcPluginInstance* create_instance()
     std::memset(&s->output_frame, 0, sizeof(SpcFrame));
     s->has_cached_mask = false;
     s->mask_warned = false;
+    s->mask_dim_warned = false;
     s->subsense = std::make_unique<spclib::bgs::SuBSENSE>(spclib::bgs::SuBSENSEParams());
 #ifdef SPC_HAS_VULKAN
     s->gpu_init_attempted = false;
@@ -212,6 +214,7 @@ static int start(SpcPluginInstance* inst)
     s->cached_mask = cv::Mat();
     s->has_cached_mask = false;
     s->mask_warned = false;
+    s->mask_dim_warned = false;
 #ifdef SPC_HAS_VULKAN
     s->gpu_init_attempted = false;
     s->gpu_available = false;
@@ -292,6 +295,27 @@ static bool cache_detect_mask(SubsenseBgsState* s, const SpcFrame* mask_frame)
     return true;
 }
 
+// The cached mask is only usable when it matches the frame dimensions: both
+// the CPU detector and the GPU staging upload index it with image-sized
+// offsets, so a mismatched mask (e.g. sized for a different camera) would be
+// read out of bounds. Checked per frame — the image size can change
+// mid-stream. Warn once and ignore the mask.
+static bool mask_usable(SubsenseBgsState* s, uint32_t w, uint32_t h)
+{
+    if (!s->has_cached_mask) return false;
+    if (s->cached_mask.cols == static_cast<int>(w) &&
+        s->cached_mask.rows == static_cast<int>(h))
+        return true;
+    if (!s->mask_dim_warned) {
+        SPC_LOG_WARN(&s->host.cached_log,
+            "SuBSENSE detect mask is %dx%d but frames are %ux%u — ignoring the "
+            "mask (size it to the camera resolution).",
+            s->cached_mask.cols, s->cached_mask.rows, w, h);
+        s->mask_dim_warned = true;
+    }
+    return false;
+}
+
 // --- process ---
 
 static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t input_count,
@@ -336,13 +360,14 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t inpu
 
     auto w = static_cast<uint32_t>(in_frame->width);
     auto h = static_cast<uint32_t>(in_frame->height);
+    const bool use_mask = mask_usable(s, w, h);
 
     SpcFrame* out = s->host.acquire_frame(0, w, h, SPC_PIXEL_FORMAT_GRAY8);
     if (out)
     {
         s->fg_mask = cv::Mat(static_cast<int>(h), static_cast<int>(w), CV_8UC1, out->data);
         s->subsense->apply(s->input_image, s->fg_mask,
-                           s->has_cached_mask ? s->cached_mask : s->empty_mask);
+                           use_mask ? s->cached_mask : s->empty_mask);
         out->frame_number = in_frame->frame_number;
         out->timestamp_ns = in_frame->timestamp_ns;
         outputs[0].type = SPC_DATA_FRAME;
@@ -354,7 +379,7 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t inpu
 
     // fallback: no allocator
     s->subsense->apply(s->input_image, s->fg_mask,
-                       s->has_cached_mask ? s->cached_mask : s->empty_mask);
+                       use_mask ? s->cached_mask : s->empty_mask);
     const cv::Mat& fg_mat = s->fg_mask;
     spc::mat_to_frame(fg_mat, &s->output_frame, SPC_PIXEL_FORMAT_GRAY8,
                      in_frame->frame_number, in_frame->timestamp_ns);
@@ -431,6 +456,7 @@ static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
 
     auto w = static_cast<uint32_t>(in_frame->width);
     auto h = static_cast<uint32_t>(in_frame->height);
+    const bool use_mask = mask_usable(s, w, h);
 
     int num_channels = 1;
     switch (in_frame->format) {
@@ -461,7 +487,7 @@ static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
     pc.required_matches = p.required_matches;
     pc.learning_rate = 16;
     pc.frame_number = s->gpu_frame_counter++;
-    pc.has_mask = s->has_cached_mask ? 1 : 0;
+    pc.has_mask = use_mask ? 1 : 0;
     pc.width4 = (static_cast<int32_t>(w) + 3) / 4;
 
     auto cmd = static_cast<VkCommandBuffer>(rctx->cmd_buffer_handle);
@@ -520,7 +546,7 @@ static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
 
     const uint8_t* mask_ptr = nullptr;
     int mask_stride = 0;
-    if (s->has_cached_mask && !s->cached_mask.empty()) {
+    if (use_mask && !s->cached_mask.empty()) {
         mask_ptr = s->cached_mask.data;
         mask_stride = static_cast<int>(s->cached_mask.step[0]);
     }
