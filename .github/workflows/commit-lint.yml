@@ -1,0 +1,49 @@
+name: Commit lint
+
+# Enforces the Conventional Commits standard (see CONTRIBUTING.md) on every
+# commit in a PR and on the PR title. Release changelogs are generated from
+# commit messages, so a non-conforming commit silently vanishes from the
+# release notes — this check keeps that from happening.
+#
+# Public repo → GitHub-hosted runner (free); the private Speculor repos run
+# the same check on the self-hosted linux runner.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+jobs:
+  lint:
+    name: Conventional commits
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check PR title and commit subjects
+        shell: bash
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -eu
+          pattern='^(feat|fix|perf|docs|refactor|test|build|ci|chore|revert)(\([a-z0-9_.,/-]+\))?!?: .+'
+          ok() {
+            grep -Eq "$pattern" <<<"$1" \
+              || grep -Eq '^Release [0-9]+\.[0-9]+\.[0-9]+$' <<<"$1" \
+              || grep -Eq '^Revert ".+"$' <<<"$1"
+          }
+          fail=0
+          if ! ok "$PR_TITLE"; then
+            echo "::error::PR title '$PR_TITLE' is not a conventional commit subject — expected 'type(scope): subject', see CONTRIBUTING.md"
+            fail=1
+          fi
+          while read -r sha subject; do
+            if ! ok "$subject"; then
+              echo "::error::commit $sha: '$subject' — expected 'type(scope): subject', see CONTRIBUTING.md"
+              fail=1
+            fi
+          done < <(git log --no-merges --format='%h %s' "$BASE_SHA..$HEAD_SHA")
+          exit $fail

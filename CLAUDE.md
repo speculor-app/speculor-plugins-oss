@@ -11,6 +11,7 @@ Speculor — and everything under it (`speculor-app`, `speculor-sdk`, `speculor-
 ## Workflow rules
 
 - **Never commit or push** unless the user explicitly asks.
+- **Commit messages and PR titles follow Conventional Commits** (`type(scope): subject` — full rules in `CONTRIBUTING.md`, enforced by CI on PRs). Release notes are generated from `feat`/`fix`/`perf` subjects, so write them for a user reading the changelog. Applies to all four Speculor repos.
 - **Update docs before committing** — keep README.md, this file, NOTICE and
   THIRD_PARTY_NOTICES.md in sync with plugin/licensing changes.
 - This is a **public, mixed-license** repo. Treat licensing carefully: every
