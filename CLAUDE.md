@@ -12,6 +12,7 @@ Speculor — and everything under it (`speculor-app`, `speculor-sdk`, `speculor-
 
 - **Never commit or push** unless the user explicitly asks.
 - **Commit messages and PR titles follow Conventional Commits** (`type(scope): subject` — full rules in `CONTRIBUTING.md`, enforced by CI on PRs). Release notes are generated from `feat`/`fix`/`perf` subjects, so write them for a user reading the changelog. Applies to all four Speculor repos.
+- **Never merge with a red Build check.** CI builds against the latest *published* SDK bundle from `speculor-sdk-dist`, so a PR that needs unreleased SDK API stays open until that SDK release is published (this exact skew broke main on 2026-07-04: `sdr_source_helpers.h` was merged before any bundle contained it). Build (Linux) / Build (Windows) / Conventional commits are required checks on `main`.
 - **Update docs before committing** — keep README.md, this file, NOTICE and
   THIRD_PARTY_NOTICES.md in sync with plugin/licensing changes.
 - This is a **public, mixed-license** repo. Treat licensing carefully: every
