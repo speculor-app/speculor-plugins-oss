@@ -157,6 +157,7 @@ static const SpcPluginDescriptor* get_descriptor()
     if (!g_desc_initialized) {
         spc::DescriptorBuilder("rtl_sdr", "RTL-SDR", "Signal/SDR/Sources")
             .author("Speculor").version("0.1.0")
+            .data_source()
             .description("Streams I/Q data from RTL-SDR Blog V3 (R820T2) and V4 (R828D) receivers")
             .maturity(SPC_MATURITY_PREVIEW)
             .tags({"radio"})
