@@ -18,7 +18,7 @@ any other plugin.
 |--------|----------|-----------|---------------|
 | **vibe_bgs** | frame → frame | ViBe background subtraction (CPU + Vulkan GPU) | Apache-2.0; LITIV-derived; **ViBe is patent-encumbered** in some jurisdictions |
 | **subsense_bgs** | frame → frame | SuBSENSE background subtraction (CPU + Vulkan GPU) | Apache-2.0; LITIV-derived |
-| **rtl_sdr** | — → signal | RTL-SDR I/Q source | Apache-2.0 plugin code; links **librtlsdr (LGPL-2.1+)** at runtime |
+| **rtl_sdr** | — → signal | RTL-SDR I/Q source (data-source plugin — captured by session recording, driven by reinjection replay) | Apache-2.0 plugin code; links **librtlsdr (LGPL-2.1+)** at runtime |
 
 The ViBe/SuBSENSE CPU algorithms live under `common/bgs/` (derived from the
 [LITIV Framework](https://github.com/plstcharles/litiv), © 2015 Pierre-Luc
@@ -32,6 +32,8 @@ ships no LITIV-derived code.
    [speculor-sdk-dist releases](https://github.com/speculor-app/speculor-sdk-dist/releases)
    and extract it. It is self-contained (ships OpenCV, FFmpeg, Vulkan, spclib + the
    CMake config/helpers) — you need only CMake ≥ 3.24, Ninja and a C++20 compiler.
+   The current plugins require an SDK bundle **≥ 0.20.0** (`rtl_sdr` declares the
+   `SPC_PLUGIN_DATA_SOURCE` descriptor flag, added in SDK 0.20.0).
 
 2. **Build**, pointing `CMAKE_PREFIX_PATH` at the extracted folder:
 

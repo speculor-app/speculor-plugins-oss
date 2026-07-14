@@ -38,7 +38,7 @@ common/bgs/        # LITIV-derived CPU algorithm sources (Apache-2.0, © 2015 P-
 plugins/
   vibe_bgs/        # ViBe BGS plugin (CPU + Vulkan GPU)
   subsense_bgs/    # SuBSENSE BGS plugin (CPU + Vulkan GPU)
-  rtl_sdr/         # RTL-SDR I/Q source (links librtlsdr LGPL-2.1+ at runtime)
+  rtl_sdr/         # RTL-SDR I/Q source — data-source plugin (SPC_PLUGIN_DATA_SOURCE, needs SDK ≥ 0.20.0); links librtlsdr LGPL-2.1+ at runtime
   cmake/           # FindRtlSdr.cmake (header locator) + RtlSdr.cmake (downloader)
 ```
 
