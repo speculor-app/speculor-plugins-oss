@@ -31,13 +31,14 @@ set(SPC_OSS_COMMON_DIR ${CMAKE_SOURCE_DIR}/common)
 # in the as-shipped plugins/ layout). spc_add_plugin reads SPC_PLUGIN_BUNDLE_<name>
 # to route each plugin DLL into <SPC_PLUGIN_OUTPUT_DIR>/oss/. Keep this in sync with
 # scripts/bundles.yaml.
-foreach(_oss_plugin vibe_bgs subsense_bgs rtl_sdr)
+foreach(_oss_plugin vibe_bgs subsense_bgs rtl_sdr kraken_sdr)
     set(SPC_PLUGIN_BUNDLE_${_oss_plugin} "oss")
 endforeach()
 
 add_subdirectory(plugins/vibe_bgs)
 add_subdirectory(plugins/subsense_bgs)
 add_subdirectory(plugins/rtl_sdr)
+add_subdirectory(plugins/kraken_sdr)
 
 # ship the licensing files with any install/redistribution (Apache-2.0 §4 / LGPL)
 include(GNUInstallDirs)

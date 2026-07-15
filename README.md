@@ -19,6 +19,7 @@ any other plugin.
 | **vibe_bgs** | frame → frame | ViBe background subtraction (CPU + Vulkan GPU) | Apache-2.0; LITIV-derived; **ViBe is patent-encumbered** in some jurisdictions |
 | **subsense_bgs** | frame → frame | SuBSENSE background subtraction (CPU + Vulkan GPU) | Apache-2.0; LITIV-derived |
 | **rtl_sdr** | — → signal | RTL-SDR I/Q source (data-source plugin — captured by session recording, driven by reinjection replay) | Apache-2.0 plugin code; links **librtlsdr (LGPL-2.1+)** at runtime |
+| **kraken_sdr** | — → 5× signal | KrakenSDR 5-channel coherent RTL-SDR array source (data-source plugin; reuses the `rtl_sdr` device layer) | Apache-2.0 plugin code; links **librtlsdr (LGPL-2.1+)** at runtime |
 
 The ViBe/SuBSENSE CPU algorithms live under `common/bgs/` (derived from the
 [LITIV Framework](https://github.com/plstcharles/litiv), © 2015 Pierre-Luc
@@ -64,7 +65,7 @@ scaffolding, build files) is **Apache-2.0** — see the root [`LICENSE`](LICENSE
 
 - `vibe_bgs`, `subsense_bgs` — Apache-2.0, contain LITIV-derived code; **ViBe is
   patent-encumbered** in some jurisdictions.
-- `rtl_sdr` — Apache-2.0 plugin code linking **librtlsdr (LGPL-2.1+)** at runtime.
+- `rtl_sdr`, `kraken_sdr` — Apache-2.0 plugin code linking **librtlsdr (LGPL-2.1+)** at runtime.
 
 See each `plugins/<name>/LICENSE` and the root
 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md). The plugins load at runtime against

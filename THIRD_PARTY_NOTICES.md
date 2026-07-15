@@ -43,7 +43,8 @@ use of the ViBe-based motion detector requires a patent license in their jurisdi
 - Project: <https://github.com/rtlsdrblog/rtl-sdr-blog>
 - License: GNU Lesser General Public License, version 2.1 or later (LGPL-2.1-or-later).
 
-The `rtl_sdr` plugin uses the RTL-SDR API. The library (`rtlsdr.dll` / `librtlsdr.so`)
+The `rtl_sdr` and `kraken_sdr` plugins use the RTL-SDR API (the KrakenSDR is a
+five-channel RTL-SDR array). The library (`rtlsdr.dll` / `librtlsdr.so`)
 is **loaded at runtime** via `LoadLibrary`/`dlopen`; only the `rtl-sdr.h` header is
 used at compile time. Because the library is dynamically loaded rather than statically
 linked, the LGPL's relinking requirement is satisfied by the runtime-replaceable
