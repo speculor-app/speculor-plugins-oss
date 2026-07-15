@@ -95,6 +95,7 @@ struct KrakenSdrState {
     int32_t center_freq = 100000000;  // 100 MHz (FM band — a common PR illuminator)
     int32_t sample_rate = 2400000;    // 2.4 MSPS (Kraken recommended max)
     int32_t bandwidth = 0;            // 0 = auto
+    int32_t dithering = 0;            // off: the SDM drifts each tuner's phase independently
     int32_t agc_enabled = 0;          // off by default: coherent capture wants manual gain
     float   gain_db = 30.0f;          // universal manual gain, snapped to a hw step
     int32_t freq_correction = 0;      // PPM (single shared TCXO)
@@ -183,6 +184,15 @@ static const SpcPluginDescriptor* get_descriptor()
             .int_param(SPC_SDR_FREQ_CORRECTION, "Freq Correction (PPM)",
                        -100, 100, 0, 1, SPC_SDR_GROUP_HARDWARE)
                 .param_description("Clock correction in PPM for the shared TCXO")
+            .bool_param(SPC_SDR_DITHERING, "Frequency Dithering", false, SPC_SDR_GROUP_HARDWARE)
+                .param_description("Leave OFF for a coherent array: with the R820T2's sigma-delta "
+                                   "modulator running, each tuner's phase drifts independently and "
+                                   "the array decorrelates itself over minutes, taking any "
+                                   "calibration with it. On spreads the fractional-N PLL's spurs "
+                                   "into a noise pedestal, which only helps single-channel "
+                                   "reception. Exposed because OFF is a claim about this hardware "
+                                   "worth being able to test — compare the calibrator's lock "
+                                   "quality both ways. R820T-only; a V4's R828D rejects it")
             .bool_param("noise_source", "Calibration Noise Source", false, SPC_SDR_GROUP_HARDWARE)
                 .param_description("Toggle the onboard noise source (control dongle GPIO 0): "
                                    "injects a common tone into all channels for a calibration node")
@@ -292,6 +302,14 @@ static int set_parameter(SpcPluginInstance* inst, const char* name,
         }
         return 0;
     }
+    if (spc::try_set_bool(name, value, SPC_SDR_DITHERING, s->dithering)) {
+        if (live) for (int k = 0; k < NUM_CH; ++k) if (s->devices[k]) {
+            s->devices[k]->set_dithering(s->dithering != 0);
+            // Only reaches the PLL on the next programming of it.
+            s->devices[k]->set_center_freq(static_cast<uint32_t>(s->center_freq));
+        }
+        return 0;
+    }
     if (spc::try_set_float(name, value, SPC_SDR_GAIN, s->gain_db)) {
         if (live && !s->agc_enabled) apply_gain_all(s);
         return 0;
@@ -336,6 +354,7 @@ static int get_parameter(SpcPluginInstance* inst, const char* name, SpcParameter
     if (spc::try_get_bool(name, out, SPC_SDR_AGC_ENABLED, s->agc_enabled)) {
         if (no_dev) out->flags |= SPC_PARAM_FLAG_DISABLED; return 0;
     }
+    if (spc::try_get_bool(name, out, SPC_SDR_DITHERING, s->dithering)) return 0;
     if (spc::try_get_float(name, out, SPC_SDR_GAIN, s->gain_db)) {
         if (no_dev || agc_on) out->flags |= SPC_PARAM_FLAG_DISABLED; return 0;
     }
@@ -411,7 +430,7 @@ static int start(SpcPluginInstance* inst)
         // With the SDM on, each tuner's phase drifts slowly and independently —
         // the array decorrelates itself over minutes, and any calibration goes
         // stale behind it. Not every librtlsdr exports this.
-        if (!d->set_dithering(false))
+        if (!d->set_dithering(s->dithering != 0) && s->dithering == 0)
             SPC_LOG_WARN(&s->host.cached_log, "KrakenSDR: ch%d cannot disable dithering — this "
                          "librtlsdr has no rtlsdr_set_dithering, so the tuner's sigma-delta "
                          "modulator stays on and this channel's phase will drift. Raise "
