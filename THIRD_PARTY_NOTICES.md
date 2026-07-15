@@ -16,7 +16,8 @@ build — Vulkan, Eigen, libjpeg-turbo, and others). Those are reproduced in
 | Component | Version | License | SPDX |
 |---|---|---|---|
 | LITIV Framework (ViBe, SuBSENSE, LBSP) | git, © 2015 Pierre-Luc St-Charles | Apache License 2.0 | Apache-2.0 |
-| librtlsdr (rtl-sdr-blog fork) | 1.3.6 | GNU Lesser General Public License v2.1 or later | LGPL-2.1-or-later |
+| librtlsdr (librtlsdr/librtlsdr fork) | 0.9.0 | GNU Lesser General Public License v2.1 or later | LGPL-2.1-or-later |
+| libusb (statically linked inside the shipped librtlsdr binary) | per upstream release | GNU Lesser General Public License v2.1 or later | LGPL-2.1-or-later |
 
 ## LITIV Framework (ViBe, SuBSENSE, LBSP)
 
@@ -40,8 +41,13 @@ use of the ViBe-based motion detector requires a patent license in their jurisdi
 
 ## librtlsdr
 
-- Project: <https://github.com/rtlsdrblog/rtl-sdr-blog>
+- Project: <https://github.com/librtlsdr/librtlsdr>
 - License: GNU Lesser General Public License, version 2.1 or later (LGPL-2.1-or-later).
+
+This fork rather than another because it is the only one exporting `rtlsdr_set_dithering`,
+which a coherent array needs in order to stop the R820T2's sigma-delta modulator drifting
+each tuner's phase independently. The Windows build shipped is the upstream
+`rtlsdr-bin-w64_static` release, which links libusb statically.
 
 The `rtl_sdr` and `kraken_sdr` plugins use the RTL-SDR API (the KrakenSDR is a
 five-channel RTL-SDR array). The library (`rtlsdr.dll` / `librtlsdr.so`)
@@ -50,6 +56,11 @@ used at compile time. Because the library is dynamically loaded rather than stat
 linked, the LGPL's relinking requirement is satisfied by the runtime-replaceable
 library; redistributing the plugin alongside `rtlsdr.dll`/`librtlsdr.so` carries the
 LGPL attribution and source-availability obligations for that library.
+
+The Windows binary is upstream's static build, which has **libusb** (also
+LGPL-2.1-or-later) linked into it, so redistributing it carries libusb's obligations
+too. The same relinking argument covers it: the whole library is loaded at runtime and
+a recipient can replace it wholesale.
 
 The full license text for each component is distributed with its upstream project and
 applies unmodified.
