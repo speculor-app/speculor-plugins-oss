@@ -110,6 +110,13 @@ public:
     bool set_sample_rate(uint32_t rate_hz);
     bool set_bandwidth(uint32_t bw_hz);
 
+    // What the hardware is actually doing, which need not be what it was asked
+    // to do: the tuner snaps to what its PLL can synthesise, and a set that
+    // failed outright is otherwise indistinguishable from one that worked —
+    // a mis-tuned channel just looks like a quiet one. 0 = unavailable.
+    [[nodiscard]] uint32_t get_center_freq() const;
+    [[nodiscard]] uint32_t get_sample_rate() const;
+
     // gain
     bool set_agc(bool enabled);
     bool set_tuner_gain_mode(bool manual);
