@@ -399,20 +399,58 @@ static int start(SpcPluginInstance* inst)
     s->actual_sample_rate = static_cast<double>(rate);
     for (int k = 0; k < NUM_CH; ++k) {
         auto* d = s->devices[k].get();
-        d->set_sample_rate(rate);
-        d->set_center_freq(static_cast<uint32_t>(s->center_freq));
-        d->set_bandwidth(static_cast<uint32_t>(s->bandwidth));
-        d->set_freq_correction(s->freq_correction);
-        d->set_dithering(false);  // mandatory: dithering breaks phase coherence
+        // A tuner that refuses a setting stays where it was, and a channel parked
+        // on the wrong frequency is indistinguishable from one whose antenna is
+        // dead: both are flat noise with a DC spike at centre.
+        if (!d->set_sample_rate(rate))
+            SPC_LOG_ERROR(&s->host.cached_log, "KrakenSDR: ch%d rejected sample rate %u Hz", k, rate);
+        // Before the frequency, not after: the setting takes effect at the next
+        // PLL programming, so disabling it once the tuner has already been tuned
+        // leaves the sigma-delta modulator running until something retunes.
+        //
+        // With the SDM on, each tuner's phase drifts slowly and independently —
+        // the array decorrelates itself over minutes, and any calibration goes
+        // stale behind it. Not every librtlsdr exports this.
+        if (!d->set_dithering(false))
+            SPC_LOG_WARN(&s->host.cached_log, "KrakenSDR: ch%d cannot disable dithering — this "
+                         "librtlsdr has no rtlsdr_set_dithering, so the tuner's sigma-delta "
+                         "modulator stays on and this channel's phase will drift. Raise "
+                         "recal_interval_s on the calibrator to chase it", k);
+        if (!d->set_center_freq(static_cast<uint32_t>(s->center_freq)))
+            SPC_LOG_ERROR(&s->host.cached_log, "KrakenSDR: ch%d rejected center freq %d Hz — this "
+                          "channel is NOT tuned where the others are", k, s->center_freq);
+        d->set_bandwidth(static_cast<uint32_t>(s->bandwidth));   // 0 = auto; absent in some forks
+        if (!d->set_freq_correction(s->freq_correction) && s->freq_correction != 0)
+            SPC_LOG_WARN(&s->host.cached_log, "KrakenSDR: ch%d rejected %d ppm correction",
+                         k, s->freq_correction);
         if (s->agc_enabled) {
             d->set_agc(true);
             d->set_tuner_gain_mode(false);
         } else {
             d->set_agc(false);
-            d->set_tuner_gain_mode(true);
+            if (!d->set_tuner_gain_mode(true))
+                SPC_LOG_ERROR(&s->host.cached_log, "KrakenSDR: ch%d refused manual gain mode", k);
         }
     }
     if (!s->agc_enabled) apply_gain_all(s);
+
+    // Ask each tuner what it actually did. Without this, a channel that never
+    // took the frequency looks exactly like one with a dead antenna.
+    for (int k = 0; k < NUM_CH; ++k) {
+        const uint32_t f = s->devices[k]->get_center_freq();
+        const uint32_t r = s->devices[k]->get_sample_rate();
+        if (f == 0 && r == 0) continue;   // read-back unavailable in this build
+        const auto want_f = static_cast<uint32_t>(s->center_freq);
+        // The R820T2's PLL cannot land on every integer hertz; a small snap is
+        // normal and is identical across the five, so only flag a real miss.
+        const bool freq_bad = (f > want_f ? f - want_f : want_f - f) > 100000u;
+        if (freq_bad || r != rate)
+            SPC_LOG_ERROR(&s->host.cached_log,
+                          "KrakenSDR: ch%d reads back %u Hz @ %u Hz, was set to %u Hz @ %u Hz",
+                          k, f, r, want_f, rate);
+        else
+            SPC_LOG_INFO(&s->host.cached_log, "KrakenSDR: ch%d tuned %u Hz @ %u Hz", k, f, r);
+    }
 
     // GPIO (noise source + per-channel bias tees) all live on the channel-0
     // control dongle: GPIO 0 = noise source, GPIO 1..5 = bias tees

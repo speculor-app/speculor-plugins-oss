@@ -218,6 +218,16 @@ bool RtlSdrDevice::set_bandwidth(uint32_t bw_hz)
     return dev_ && api_.SetTunerBandwidth && api_.SetTunerBandwidth(dev_, bw_hz) == 0;
 }
 
+uint32_t RtlSdrDevice::get_center_freq() const
+{
+    return (dev_ && api_.GetCenterFreq) ? api_.GetCenterFreq(dev_) : 0;
+}
+
+uint32_t RtlSdrDevice::get_sample_rate() const
+{
+    return (dev_ && api_.GetSampleRate) ? api_.GetSampleRate(dev_) : 0;
+}
+
 // ── gain ────────────────────────────────────────────────────────────
 
 bool RtlSdrDevice::set_agc(bool enabled)

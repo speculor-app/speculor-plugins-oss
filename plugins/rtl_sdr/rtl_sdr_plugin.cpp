@@ -195,7 +195,12 @@ static const SpcPluginDescriptor* get_descriptor()
             .int_param(SPC_SDR_FREQ_CORRECTION, "Freq Correction (PPM)", -100, 100, 0, 1, SPC_SDR_GROUP_HARDWARE)
                 .param_description("Frequency correction in parts per million for crystal offset")
             .bool_param(SPC_SDR_DITHERING, "Frequency Dithering", true, SPC_SDR_GROUP_HARDWARE)
-                .param_description("Frequency dithering to improve phase noise on R828D tuner")
+                .param_description("R820T/R820T2 only; the tuner rejects it on a V4's R828D. On "
+                                   "spreads the fractional-N PLL's spurs into a noise pedestal, "
+                                   "which is what you want for general reception. Off leaves "
+                                   "discrete spurs but holds the tuner's phase steady, which is "
+                                   "what narrowband or phase-sensitive work needs — a coherent "
+                                   "array requires it off, and kraken_sdr forces it")
             .bool_param("test_mode", "Test Mode", false, SPC_SDR_GROUP_HARDWARE)
                 .param_description("Output 8-bit counter instead of samples (debug)")
             .int_param("if_gain", "IF Gain (0.1 dB)", -30, 90, 0, 10, SPC_SDR_GROUP_HARDWARE)
@@ -296,7 +301,11 @@ static int set_parameter(SpcPluginInstance* inst, const char* name,
         return 0;
     }
     if (spc::try_set_bool(name, value, SPC_SDR_DITHERING, s->dithering)) {
-        if (live) dev->set_dithering(s->dithering != 0);
+        if (live) {
+            dev->set_dithering(s->dithering != 0);
+            // Only reaches the PLL on the next programming of it.
+            dev->set_center_freq(static_cast<uint32_t>(s->center_freq));
+        }
         return 0;
     }
     if (spc::try_set_bool(name, value, "test_mode", s->test_mode)) {
@@ -417,6 +426,10 @@ static int start(SpcPluginInstance* inst)
     s->device->set_sample_rate(rate);
     s->actual_sample_rate = static_cast<double>(rate);
 
+    // Before the frequency: the setting takes hold at the next PLL programming,
+    // so applying it afterwards leaves the tuner as it was until something
+    // retunes. R820T-only — the call fails on a V4's R828D, which is expected.
+    s->device->set_dithering(s->dithering != 0);
     s->device->set_center_freq(static_cast<uint32_t>(s->center_freq));
     s->device->set_bandwidth(static_cast<uint32_t>(s->bandwidth));
     s->device->set_freq_correction(s->freq_correction);
@@ -428,7 +441,6 @@ static int start(SpcPluginInstance* inst)
     s->device->set_offset_tuning(s->offset_tuning != 0);
     s->device->set_bias_tee(s->bias_tee != 0);
     s->device->set_testmode(s->test_mode != 0);
-    s->device->set_dithering(s->dithering != 0);
     if (s->if_gain != 0)
         s->device->set_tuner_if_gain(1, s->if_gain);
 
