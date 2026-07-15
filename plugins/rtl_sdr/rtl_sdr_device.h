@@ -134,6 +134,11 @@ public:
     // data access (consumer side of ring buffer)
     uint32_t read_iq(int16_t* buffer, uint32_t max_samples);
 
+    // I/Q sample pairs buffered and ready to read (used to align multi-device
+    // reads: a coherent multi-channel source gates on all channels having a
+    // full batch before reading equal counts from each)
+    [[nodiscard]] uint32_t available() const { return ring_ ? spc_ring_available(ring_) : 0; }
+
     // enumeration
     static std::vector<RtlSdrDeviceInfo> enumerate();
 

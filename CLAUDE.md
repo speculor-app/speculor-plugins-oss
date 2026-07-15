@@ -39,6 +39,7 @@ plugins/
   vibe_bgs/        # ViBe BGS plugin (CPU + Vulkan GPU)
   subsense_bgs/    # SuBSENSE BGS plugin (CPU + Vulkan GPU)
   rtl_sdr/         # RTL-SDR I/Q source — data-source plugin (SPC_PLUGIN_DATA_SOURCE, needs SDK ≥ 0.20.0); links librtlsdr LGPL-2.1+ at runtime
+  kraken_sdr/      # KrakenSDR 5-channel coherent RTL-SDR array source (5 signal ports); compiles rtl_sdr's device layer; links librtlsdr LGPL-2.1+ at runtime
   cmake/           # FindRtlSdr.cmake (header locator) + RtlSdr.cmake (downloader)
 ```
 
