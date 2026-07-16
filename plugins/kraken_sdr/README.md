@@ -5,7 +5,7 @@ Streams five coherent I/Q channels from a [KrakenSDR](https://www.krakenrf.com/)
 28.8 MHz TCXO). It opens the five tuners directly (no external daemon), reusing the
 `rtl_sdr` device layer, and emits one `SPC_DATA_SIGNAL` port per channel.
 
-`Signal/SDR/Sources` · data-source plugin · maturity **PREVIEW**.
+`Signal/SDR/Passive Radar/Sources` · data-source plugin · maturity **PREVIEW**.
 
 ## Coherence scope — read this first
 

@@ -150,7 +150,7 @@ static const SpcPluginDescriptor* scan_devices(const SpcHostServices* svc)
 static const SpcPluginDescriptor* get_descriptor()
 {
     if (!g_desc_initialized) {
-        spc::DescriptorBuilder("kraken_sdr", "KrakenSDR", "Signal/SDR/Sources")
+        spc::DescriptorBuilder("kraken_sdr", "KrakenSDR", "Signal/SDR/Passive Radar/Sources")
             .author("Speculor").version("0.1.0")
             .data_source()
             .description("Streams five coherent I/Q channels from a KrakenSDR "
@@ -158,7 +158,7 @@ static const SpcPluginDescriptor* get_descriptor()
                          "capture for passive radar / beamforming — phase calibration "
                          "is a downstream node.")
             .maturity(SPC_MATURITY_PREVIEW)
-            .tags({"radio"})
+            .tags({"radio", "sdr", "passive-radar"})
             // five channel outputs; channel 0 = serial 1000 = reference dongle
             .output_signal("iq_ch0", "Channel 0 I/Q (reference)",
                            {{"i", SPC_FIELD_INT16}, {"q", SPC_FIELD_INT16}})
