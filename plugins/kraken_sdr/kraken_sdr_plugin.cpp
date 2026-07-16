@@ -391,11 +391,19 @@ static int set_parameter(SpcPluginInstance* inst, const char* name,
     }
     if (spc::try_set_bool(name, value, SPC_SDR_AGC_ENABLED, s->agc_enabled)) {
         if (live) {
+            // Seed the gain codes with the manual gain before handing over to
+            // auto — the auto branch never writes them (see start()).
             for (int k = 0; k < NUM_CH; ++k) if (s->devices[k]) {
-                s->devices[k]->set_agc(s->agc_enabled != 0);
-                s->devices[k]->set_tuner_gain_mode(s->agc_enabled == 0);  // manual when AGC off
+                s->devices[k]->set_agc(false);
+                s->devices[k]->set_tuner_gain_mode(true);
             }
-            if (!s->agc_enabled) apply_gain_all(s);
+            apply_gain_all(s);
+            if (s->agc_enabled) {
+                for (int k = 0; k < NUM_CH; ++k) if (s->devices[k]) {
+                    s->devices[k]->set_tuner_gain_mode(false);
+                    s->devices[k]->set_agc(true);
+                }
+            }
         }
         return 0;
     }
@@ -552,16 +560,22 @@ static int start(SpcPluginInstance* inst)
         if (!d->set_freq_correction(s->freq_correction) && s->freq_correction != 0)
             SPC_LOG_WARN(&s->host.cached_log, "KrakenSDR: ch%d rejected %d ppm correction",
                          k, s->freq_correction);
-        if (s->agc_enabled) {
-            d->set_agc(true);
-            d->set_tuner_gain_mode(false);
-        } else {
-            d->set_agc(false);
-            if (!d->set_tuner_gain_mode(true))
-                SPC_LOG_ERROR(&s->host.cached_log, "KrakenSDR: ch%d refused manual gain mode", k);
+        // Manual gain mode first in BOTH modes: the tuner's auto branch never
+        // writes the LNA/mixer gain-code registers, and a cold start leaves
+        // them at minimum — seeding them with the manual gain below makes an
+        // AGC-enabled start deterministic instead of settling wherever the
+        // init state happens to fall.
+        d->set_agc(false);
+        if (!d->set_tuner_gain_mode(true))
+            SPC_LOG_ERROR(&s->host.cached_log, "KrakenSDR: ch%d refused manual gain mode", k);
+    }
+    apply_gain_all(s);
+    if (s->agc_enabled) {
+        for (int k = 0; k < NUM_CH; ++k) if (s->devices[k]) {
+            s->devices[k]->set_tuner_gain_mode(false);   // auto, keeping the seeded codes
+            s->devices[k]->set_agc(true);
         }
     }
-    if (!s->agc_enabled) apply_gain_all(s);
 
     // Ask each tuner what it actually did. Without this, a channel that never
     // took the frequency looks exactly like one with a dead antenna.
