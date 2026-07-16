@@ -72,6 +72,12 @@ struct RtlSdrState {
 
     // parameters — Hardware group
     int32_t direct_sampling = 0; // 0=off, 1=I-ADC, 2=Q-ADC
+    // Direct-sampling mode currently programmed into the hardware. librtlsdr
+    // RE-INITIALISES THE WHOLE TUNER on every set_direct_sampling call — even
+    // a no-op "off" — silently resetting the bandwidth filter and the gain
+    // registers. So the mode is only ever written on an actual transition,
+    // and bandwidth + gain are re-applied afterwards.
+    int32_t applied_ds = -1;     // -1 = nothing programmed yet
     int32_t offset_tuning = 0;
     int32_t bias_tee = 0;
     int32_t freq_correction = 0; // PPM
@@ -130,6 +136,41 @@ static void apply_manual_gain(spc::rtlsdr::RtlSdrDevice* dev, float gain_db, Spc
         target = best;
     }
     dev->set_tuner_gain(target);
+}
+
+// Apply the AGC/manual gain configuration. When enabling AGC, the tuner's
+// LNA/mixer gain-code registers are SEEDED with the manual gain first: the
+// driver's auto branch never writes those code bits, and a cold start leaves
+// them at the init array's minimum — measured on an RTL-SDR Blog V4, "AGC on
+// from cold" then sits at minimum RF gain with the digital AGC amplifying the
+// quantisation floor into a wall of noise, and stays there until a manual
+// gain is set once. Seeding makes AGC-on deterministic: identical from a cold
+// start and from a live toggle.
+static void apply_gain_config(RtlSdrState* s)
+{
+    auto* dev = s->device.get();
+    if (!dev) return;
+    if (s->agc_enabled) {
+        dev->set_tuner_gain_mode(true);
+        apply_manual_gain(dev, s->gain_db, &s->host.cached_log);
+        dev->set_tuner_gain_mode(false);   // auto, keeping the seeded codes
+        dev->set_agc(true);
+    } else {
+        dev->set_agc(false);
+        dev->set_tuner_gain_mode(true);
+        apply_manual_gain(dev, s->gain_db, &s->host.cached_log);
+    }
+}
+
+// Program the direct-sampling mode only when it actually changes, and repair
+// what the driver's tuner re-init destroys (bandwidth filter, gain state).
+static void apply_direct_sampling(RtlSdrState* s, int want)
+{
+    if (want == s->applied_ds || !s->device) return;
+    s->device->set_direct_sampling(want);
+    s->applied_ds = want;
+    s->device->set_bandwidth(static_cast<uint32_t>(s->bandwidth));
+    apply_gain_config(s);
 }
 
 static const SpcPluginDescriptor* scan_devices(const SpcHostServices* svc)
@@ -251,12 +292,12 @@ static int set_parameter(SpcPluginInstance* inst, const char* name,
         if (live) {
             dev->set_center_freq(static_cast<uint32_t>(s->center_freq));
             // V3: auto-toggle direct sampling for HF, matching start() behavior
-            // V4 uses a built-in upconverter and handles HF transparently
+            // V4 uses a built-in upconverter and handles HF transparently.
+            // Transition-guarded: re-programming the same mode on every retune
+            // would re-initialise the tuner each time.
             if (!dev->is_v4()) {
-                if (s->center_freq < 24000000)
-                    dev->set_direct_sampling(2);   // Q-ADC for HF
-                else if (s->direct_sampling == 0)
-                    dev->set_direct_sampling(0);   // restore normal tuner mode
+                const int want = (s->center_freq < 24000000) ? 2 : s->direct_sampling;
+                apply_direct_sampling(s, want);
             }
         }
         return 0;
@@ -271,11 +312,7 @@ static int set_parameter(SpcPluginInstance* inst, const char* name,
         return 0;
     }
     if (spc::try_set_bool(name, value, SPC_SDR_AGC_ENABLED, s->agc_enabled)) {
-        if (live) {
-            dev->set_agc(s->agc_enabled != 0);
-            dev->set_tuner_gain_mode(s->agc_enabled == 0); // manual when AGC off
-            if (!s->agc_enabled) apply_manual_gain(dev, s->gain_db, &s->host.cached_log);
-        }
+        if (live) apply_gain_config(s);
         return 0;
     }
     if (spc::try_set_float(name, value, SPC_SDR_GAIN, s->gain_db)) {
@@ -285,7 +322,11 @@ static int set_parameter(SpcPluginInstance* inst, const char* name,
         return 0;
     }
     if (spc::try_set_enum(name, value, SPC_SDR_DIRECT_SAMPLING, s->direct_sampling)) {
-        if (live) dev->set_direct_sampling(s->direct_sampling);
+        if (live) {
+            const int want = (!dev->is_v4() && s->center_freq < 24000000)
+                               ? 2 : s->direct_sampling;
+            apply_direct_sampling(s, want);
+        }
         return 0;
     }
     if (spc::try_set_bool(name, value, "offset_tuning", s->offset_tuning)) {
@@ -426,6 +467,15 @@ static int start(SpcPluginInstance* inst)
     s->device->set_sample_rate(rate);
     s->actual_sample_rate = static_cast<double>(rate);
 
+    // Direct sampling first: a freshly opened device is in normal tuner mode,
+    // and a mode change re-initialises the tuner — anything set before it
+    // (bandwidth, gain) would be silently undone.
+    s->applied_ds = 0;
+    // V3: auto-enable direct sampling for HF (<24 MHz); V4 uses upconverter
+    const int want_ds = (!s->device->is_v4() && s->center_freq < 24000000)
+                          ? 2 : s->direct_sampling;
+    apply_direct_sampling(s, want_ds);
+
     // Before the frequency: the setting takes hold at the next PLL programming,
     // so applying it afterwards leaves the tuner as it was until something
     // retunes. R820T-only — the call fails on a V4's R828D, which is expected.
@@ -433,25 +483,13 @@ static int start(SpcPluginInstance* inst)
     s->device->set_center_freq(static_cast<uint32_t>(s->center_freq));
     s->device->set_bandwidth(static_cast<uint32_t>(s->bandwidth));
     s->device->set_freq_correction(s->freq_correction);
-    // V3: auto-enable direct sampling for HF (<24 MHz); V4 uses upconverter
-    if (!s->device->is_v4() && s->center_freq < 24000000)
-        s->device->set_direct_sampling(2);
-    else
-        s->device->set_direct_sampling(s->direct_sampling);
     s->device->set_offset_tuning(s->offset_tuning != 0);
     s->device->set_bias_tee(s->bias_tee != 0);
     s->device->set_testmode(s->test_mode != 0);
     if (s->if_gain != 0)
         s->device->set_tuner_if_gain(1, s->if_gain);
 
-    if (s->agc_enabled) {
-        s->device->set_agc(true);
-        s->device->set_tuner_gain_mode(false); // auto
-    } else {
-        s->device->set_agc(false);
-        s->device->set_tuner_gain_mode(true); // manual
-        apply_manual_gain(s->device.get(), s->gain_db, &s->host.cached_log);
-    }
+    apply_gain_config(s);
 
     if (!s->device->start_streaming()) {
         s->device.reset();
