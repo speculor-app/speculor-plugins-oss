@@ -158,7 +158,7 @@ static const SpcPluginDescriptor* get_descriptor()
                          "capture for passive radar / beamforming — phase calibration "
                          "is a downstream node.")
             .maturity(SPC_MATURITY_PREVIEW)
-            .tags({"radio"})
+            .tags({"radio", "sdr", "passive-radar"})
             // five channel outputs; channel 0 = serial 1000 = reference dongle
             .output_signal("iq_ch0", "Channel 0 I/Q (reference)",
                            {{"i", SPC_FIELD_INT16}, {"q", SPC_FIELD_INT16}})

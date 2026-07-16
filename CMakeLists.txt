@@ -89,13 +89,17 @@ endif()
 # The shared CoreBgs base + OpenCV come from spclib; see common/bgs and each plugin.
 set(SPC_OSS_COMMON_DIR ${CMAKE_SOURCE_DIR}/common)
 
-# All open-source plugins ship together in a single "oss" bundle (their own domain
+# Most open-source plugins ship together in a single "oss" bundle (their own domain
 # in the as-shipped plugins/ layout). spc_add_plugin reads SPC_PLUGIN_BUNDLE_<name>
-# to route each plugin DLL into <SPC_PLUGIN_OUTPUT_DIR>/oss/. Keep this in sync with
-# scripts/bundles.yaml.
-foreach(_oss_plugin vibe_bgs subsense_bgs rtl_sdr kraken_sdr)
+# to route each plugin DLL into <SPC_PLUGIN_OUTPUT_DIR>/<bundle>/. Keep this in sync
+# with scripts/bundles.yaml. kraken_sdr routes into the passive-radar bundle instead:
+# it is the source stage of the coherent passive-radar chain whose other members
+# (coherent_calibrator, range_doppler, pr_map) live in speculor-plugins, so the
+# deployed bundle dir holds the whole chain.
+foreach(_oss_plugin vibe_bgs subsense_bgs rtl_sdr)
     set(SPC_PLUGIN_BUNDLE_${_oss_plugin} "oss")
 endforeach()
+set(SPC_PLUGIN_BUNDLE_kraken_sdr "passive-radar")
 
 add_subdirectory(plugins/vibe_bgs)
 add_subdirectory(plugins/subsense_bgs)

@@ -13,13 +13,37 @@ defaults:
 bundles:
 
   oss:
-    sources: [plugins]
+    # Explicit list rather than [plugins]: kraken_sdr routes into the
+    # passive-radar bundle below (keep in sync with SPC_PLUGIN_BUNDLE_* in
+    # CMakeLists.txt).
+    sources:
+      - plugins/vibe_bgs
+      - plugins/subsense_bgs
+      - plugins/rtl_sdr
     vendor:
       # rtl_sdr loads librtlsdr at runtime. RtlSdr.cmake downloads rtlsdr.dll into
       # the build's bin/ on Windows; stage it into the bundle's vendor/ so the
       # loader finds it on the plugin's DLL search path. POSIX users install
       # librtlsdr from their package manager, so there's nothing to vendor there.
+      # copy, not move: the passive-radar bundle below vendors the same file and
+      # is processed after this one — a move here would leave it nothing to take.
       - from: bin/rtlsdr.dll
         if_present: true
+        copy: true
       - from: bin/ftd2xx.dll        # RTL-SDR FTDI USB backend (optional)
+        if_present: true
+
+  passive-radar:
+    # kraken_sdr joins the passive-radar bundle dir that speculor-plugins'
+    # manifest populates with coherent_calibrator / range_doppler / pr_map, so
+    # the deployed bundle holds the whole coherent chain. It needs its own copy
+    # of the librtlsdr runtime: the loader searches each plugin's OWN bundle
+    # vendor/ dir, not other bundles'.
+    # The ARCHIVE from this manifest shares its name with speculor-plugins'
+    # passive-radar archive; they are published on separate repo release pages
+    # and must not be staged into one directory. The deploy dir is shared by
+    # design.
+    sources: [plugins/kraken_sdr]
+    vendor:
+      - from: bin/rtlsdr.dll
         if_present: true
