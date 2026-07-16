@@ -285,7 +285,11 @@ bool RtlSdrDevice::set_bias_tee_gpio(int gpio, bool enabled)
 
 bool RtlSdrDevice::set_freq_correction(int ppm)
 {
-    return dev_ && api_.SetFreqCorrection && api_.SetFreqCorrection(dev_, ppm) == 0;
+    if (!dev_ || !api_.SetFreqCorrection) return false;
+    // librtlsdr returns -2 when the requested ppm is already set — a no-op,
+    // not a failure.
+    const int rc = api_.SetFreqCorrection(dev_, ppm);
+    return rc == 0 || rc == -2;
 }
 
 bool RtlSdrDevice::set_testmode(bool enabled)
@@ -314,7 +318,14 @@ int RtlSdrDevice::get_tuner_type()
 void RtlSdrDevice::async_callback(unsigned char* buf, uint32_t len, void* ctx)
 {
     auto* self = static_cast<RtlSdrDevice*>(ctx);
-    if (!self->streaming_.load(std::memory_order_relaxed)) return;
+    if (!self->streaming_.load(std::memory_order_relaxed)) {
+        // The librtlsdr fork documents cancel_async as safe only from this
+        // callback thread; the cross-thread cancel in stop_streaming() is the
+        // common practice but rides on non-atomic flags. Repeating it here
+        // guarantees the async loop actually exits.
+        self->api_.CancelAsync(self->dev_);
+        return;
+    }
 
     // RTL-SDR outputs unsigned 8-bit interleaved I/Q
     // convert to signed int16: (uint8 - 128) * 256
@@ -329,7 +340,9 @@ void RtlSdrDevice::async_callback(unsigned char* buf, uint32_t len, void* ctx)
             tmp[i * 2]     = static_cast<int16_t>((static_cast<int>(buf[src])     - 128) * 256);
             tmp[i * 2 + 1] = static_cast<int16_t>((static_cast<int>(buf[src + 1]) - 128) * 256);
         }
-        spc_ring_write(self->ring_, tmp, batch);
+        const uint32_t wrote = spc_ring_write(self->ring_, tmp, batch);
+        if (wrote != batch)
+            self->dropped_.fetch_add(batch - wrote, std::memory_order_relaxed);
         offset += batch;
     }
 }
@@ -349,6 +362,7 @@ bool RtlSdrDevice::start_streaming()
 {
     if (!dev_ || streaming_) return false;
     spc_ring_reset(ring_);
+    dropped_.store(0, std::memory_order_relaxed);
 
     if (api_.ResetBuffer(dev_) != 0) {
         SPC_LOG_ERROR(log_, "Failed to reset RTL-SDR buffer");

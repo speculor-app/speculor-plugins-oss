@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <memory>
@@ -98,6 +99,7 @@ struct KrakenSdrState {
     int32_t dithering = 0;            // off: the SDM drifts each tuner's phase independently
     int32_t agc_enabled = 0;          // off by default: coherent capture wants manual gain
     float   gain_db = 30.0f;          // universal manual gain, snapped to a hw step
+    float   cal_gain_db = -1.0f;      // gain while the noise source is on; -1 = auto (per band)
     int32_t freq_correction = 0;      // PPM (single shared TCXO)
 
     // Kraken-specific GPIO (all on the channel-0 control dongle)
@@ -112,6 +114,11 @@ struct KrakenSdrState {
     SpcTable tables[NUM_CH] = {};
     uint64_t block_index = 0;
     bool streaming = false;
+
+    // overflow reporting (each channel dropping a different amount breaks the
+    // fixed inter-channel alignment)
+    uint64_t dropped_reported = 0;
+    std::chrono::steady_clock::time_point last_drop_log{};
 };
 
 SPC_PLUGIN_CAST(KrakenSdrState)
@@ -180,6 +187,13 @@ static const SpcPluginDescriptor* get_descriptor()
                          0.0f, 50.0f, 30.0f, 0.1f, SPC_SDR_GROUP_GAIN)
                 .param_description("Universal manual gain in dB, snapped to the nearest "
                                    "hardware step and applied to all five tuners (active when AGC is off)")
+            .float_param("cal_gain_db", "Calibration Gain (dB)",
+                         -1.0f, 50.0f, -1.0f, 0.1f, SPC_SDR_GROUP_GAIN)
+                .param_description("Gain applied to all tuners while the noise source is on, "
+                                   "restored when it turns off. The burst replaces the antennas, "
+                                   "so the operating gain — set for weak off-air signals — rails "
+                                   "the 8-bit ADC and degrades the phase estimate. -1 = automatic "
+                                   "per-band value (heimdall's calibration gain table)")
             // Hardware / calibration
             .int_param(SPC_SDR_FREQ_CORRECTION, "Freq Correction (PPM)",
                        -100, 100, 0, 1, SPC_SDR_GROUP_HARDWARE)
@@ -251,11 +265,10 @@ static void destroy_instance(SpcPluginInstance* inst)
 
 // ── parameters ──────────────────────────────────────────────────────
 
-// Snap the requested dB gain to the nearest hardware step and apply it to every
-// open tuner (the Kraken uses one "universal gain" across all five).
-static void apply_gain_all(KrakenSdrState* s)
+// Snap a requested dB gain to the nearest hardware step.
+static int snap_gain_tenths(float gain_db)
 {
-    int target = static_cast<int>(s->gain_db * 10.0f + (s->gain_db >= 0.0f ? 0.5f : -0.5f));
+    int target = static_cast<int>(gain_db * 10.0f + (gain_db >= 0.0f ? 0.5f : -0.5f));
     if (g_registry.gain_count > 0) {
         int best = g_registry.gains[0];
         int best_d = target - best; if (best_d < 0) best_d = -best_d;
@@ -265,8 +278,75 @@ static void apply_gain_all(KrakenSdrState* s)
         }
         target = best;
     }
+    return target;
+}
+
+// Apply the universal manual gain to every open tuner (the Kraken uses one
+// "universal gain" across all five).
+static void apply_gain_all(KrakenSdrState* s)
+{
+    const int target = snap_gain_tenths(s->gain_db);
     for (int k = 0; k < NUM_CH; ++k)
         if (s->devices[k]) s->devices[k]->set_tuner_gain(target);
+}
+
+// heimdall's per-band calibration gain (hw_controller.py cal_gain_table,
+// converted from R820T gain indexes to dB): high enough for the noise source
+// to dominate, low enough not to rail the 8-bit ADC.
+static float auto_cal_gain_db(int32_t freq_hz)
+{
+    static constexpr float k_mhz[] = {100, 200, 300, 400, 500, 600, 700, 1700};
+    static constexpr float k_db[]  = {8.7f, 16.6f, 22.9f, 25.4f, 33.8f, 40.2f, 49.6f, 49.6f};
+    const float f = static_cast<float>(freq_hz) / 1e6f;
+    int best = 0;
+    float best_d = std::abs(f - k_mhz[0]);
+    for (int i = 1; i < 8; ++i) {
+        const float d = std::abs(f - k_mhz[i]);
+        if (d < best_d) { best_d = d; best = i; }
+    }
+    return k_db[best];
+}
+
+// While the noise source is on, the antennas are switched out — the only
+// signal gain has to fit is the burst itself, and at a DAB operating gain it
+// rails the 8-bit ADC (measured: 34.8% of burst samples clipped). heimdall
+// drops every tuner to a calibration gain for the duration and restores after.
+static void enter_cal_gain(KrakenSdrState* s)
+{
+    const float db = (s->cal_gain_db >= 0.0f) ? s->cal_gain_db
+                                              : auto_cal_gain_db(s->center_freq);
+    const int target = snap_gain_tenths(db);
+    bool all_ok = true;
+    for (int k = 0; k < NUM_CH; ++k) {
+        if (!s->devices[k]) continue;
+        if (s->agc_enabled) s->devices[k]->set_agc(false);   // amplitude cal needs fixed gain
+        s->devices[k]->set_tuner_gain_mode(true);
+        if (!s->devices[k]->set_tuner_gain(target)) {
+            all_ok = false;
+            SPC_LOG_ERROR(&s->host.cached_log,
+                          "KrakenSDR: ch%d refused calibration gain %.1f dB — its burst may clip", k,
+                          static_cast<double>(target) / 10.0);
+        }
+    }
+    if (all_ok)
+        SPC_LOG_INFO(&s->host.cached_log,
+                     "KrakenSDR: calibration gain %.1f dB engaged for the noise burst "
+                     "(operating gain %.1f dB restores when it ends)",
+                     static_cast<double>(target) / 10.0, static_cast<double>(s->gain_db));
+}
+
+static void leave_cal_gain(KrakenSdrState* s)
+{
+    for (int k = 0; k < NUM_CH; ++k) {
+        if (!s->devices[k]) continue;
+        if (s->agc_enabled) {
+            s->devices[k]->set_agc(true);
+            s->devices[k]->set_tuner_gain_mode(false);
+        }
+    }
+    if (!s->agc_enabled) apply_gain_all(s);
+    SPC_LOG_INFO(&s->host.cached_log, "KrakenSDR: operating gain restored (%s)",
+                 s->agc_enabled ? "AGC" : "manual");
 }
 
 static int set_parameter(SpcPluginInstance* inst, const char* name,
@@ -283,13 +363,30 @@ static int set_parameter(SpcPluginInstance* inst, const char* name,
     }
     if (spc::try_set_int(name, value, SPC_SDR_SAMPLE_RATE, s->sample_rate)) {
         s->actual_sample_rate = static_cast<double>(s->sample_rate);
-        if (live) for (int k = 0; k < NUM_CH; ++k)
-            if (s->devices[k]) s->devices[k]->set_sample_rate(static_cast<uint32_t>(s->sample_rate));
+        if (live) {
+            // librtlsdr soft-resets the demodulator on a rate change, so each
+            // channel's stream breaks at a different instant and the array's
+            // alignment with it. The calibrator sees the new rate in the
+            // metadata and recalibrates.
+            for (int k = 0; k < NUM_CH; ++k)
+                if (s->devices[k]) s->devices[k]->set_sample_rate(static_cast<uint32_t>(s->sample_rate));
+            SPC_LOG_WARN(&s->host.cached_log,
+                         "KrakenSDR: sample rate changed while streaming — channel alignment is "
+                         "broken until the calibrator recalibrates");
+        }
         return 0;
     }
     if (spc::try_set_int(name, value, SPC_SDR_BANDWIDTH, s->bandwidth)) {
-        if (live) for (int k = 0; k < NUM_CH; ++k)
-            if (s->devices[k]) s->devices[k]->set_bandwidth(static_cast<uint32_t>(s->bandwidth));
+        if (live) {
+            for (int k = 0; k < NUM_CH; ++k)
+                if (s->devices[k]) s->devices[k]->set_bandwidth(static_cast<uint32_t>(s->bandwidth));
+            // A bandwidth change re-tunes the PLL under the hood (the filter
+            // moves the IF), and each PLL re-locks at a new random phase — but
+            // the centre frequency the calibrator watches does not change.
+            SPC_LOG_WARN(&s->host.cached_log,
+                         "KrakenSDR: bandwidth changed while streaming — each tuner re-locked at a "
+                         "new phase; the phase calibration is stale until the next recalibration");
+        }
         return 0;
     }
     if (spc::try_set_bool(name, value, SPC_SDR_AGC_ENABLED, s->agc_enabled)) {
@@ -320,9 +417,16 @@ static int set_parameter(SpcPluginInstance* inst, const char* name,
         return 0;
     }
     if (spc::try_set_bool(name, value, "noise_source", s->noise_source)) {
-        if (ctrl) ctrl->set_bias_tee_gpio(0, s->noise_source != 0);
+        if (ctrl) {
+            // low gain before the switch flips, operating gain only after it
+            // flips back — the burst must never meet the operating gain
+            if (s->noise_source) enter_cal_gain(s);
+            ctrl->set_bias_tee_gpio(0, s->noise_source != 0);
+            if (!s->noise_source) leave_cal_gain(s);
+        }
         return 0;
     }
+    if (spc::try_set_float(name, value, "cal_gain_db", s->cal_gain_db)) return 0;
     for (int k = 0; k < NUM_CH; ++k) {
         char pname[16];
         std::snprintf(pname, sizeof(pname), "bias_tee_ch%d", k);
@@ -358,6 +462,9 @@ static int get_parameter(SpcPluginInstance* inst, const char* name, SpcParameter
     if (spc::try_get_float(name, out, SPC_SDR_GAIN, s->gain_db)) {
         if (no_dev || agc_on) out->flags |= SPC_PARAM_FLAG_DISABLED; return 0;
     }
+    if (spc::try_get_float(name, out, "cal_gain_db", s->cal_gain_db)) {
+        if (no_dev) out->flags |= SPC_PARAM_FLAG_DISABLED; return 0;
+    }
     if (spc::try_get_int(name, out, SPC_SDR_FREQ_CORRECTION, s->freq_correction)) {
         if (no_dev) out->flags |= SPC_PARAM_FLAG_DISABLED; return 0;
     }
@@ -382,6 +489,8 @@ static int start(SpcPluginInstance* inst)
 {
     auto* s = state(inst);
     s->block_index = 0;
+    s->dropped_reported = 0;
+    s->last_drop_log = {};
 
     if (!spc::rtlsdr::RtlSdrDevice::load_api()) {
         SPC_LOG_ERROR(&s->host.cached_log, "KrakenSDR: rtlsdr library not available");
@@ -431,10 +540,11 @@ static int start(SpcPluginInstance* inst)
         // the array decorrelates itself over minutes, and any calibration goes
         // stale behind it. Not every librtlsdr exports this.
         if (!d->set_dithering(s->dithering != 0) && s->dithering == 0)
-            SPC_LOG_WARN(&s->host.cached_log, "KrakenSDR: ch%d cannot disable dithering — this "
-                         "librtlsdr has no rtlsdr_set_dithering, so the tuner's sigma-delta "
-                         "modulator stays on and this channel's phase will drift. Raise "
-                         "recal_interval_s on the calibrator to chase it", k);
+            SPC_LOG_WARN(&s->host.cached_log, "KrakenSDR: ch%d cannot disable dithering — %s, "
+                         "so the tuner's sigma-delta modulator stays on and this channel's phase "
+                         "will drift. Raise recal_interval_s on the calibrator to chase it", k,
+                         d->is_v4() ? "the R828D tuner does not support the call"
+                                    : "this librtlsdr has no rtlsdr_set_dithering");
         if (!d->set_center_freq(static_cast<uint32_t>(s->center_freq)))
             SPC_LOG_ERROR(&s->host.cached_log, "KrakenSDR: ch%d rejected center freq %d Hz — this "
                           "channel is NOT tuned where the others are", k, s->center_freq);
@@ -460,8 +570,10 @@ static int start(SpcPluginInstance* inst)
         const uint32_t r = s->devices[k]->get_sample_rate();
         if (f == 0 && r == 0) continue;   // read-back unavailable in this build
         const auto want_f = static_cast<uint32_t>(s->center_freq);
-        // The R820T2's PLL cannot land on every integer hertz; a small snap is
-        // normal and is identical across the five, so only flag a real miss.
+        // librtlsdr reports the requested frequency back (and zeroes it when a
+        // tune fails), not the PLL's synthesized value — the actual grid snap
+        // (up to ~±220 Hz, common to all five) is invisible here. So any real
+        // mismatch means the set failed; the tolerance only absorbs fork quirks.
         const bool freq_bad = (f > want_f ? f - want_f : want_f - f) > 100000u;
         if (freq_bad || r != rate)
             SPC_LOG_ERROR(&s->host.cached_log,
@@ -473,6 +585,7 @@ static int start(SpcPluginInstance* inst)
 
     // GPIO (noise source + per-channel bias tees) all live on the channel-0
     // control dongle: GPIO 0 = noise source, GPIO 1..5 = bias tees
+    if (s->noise_source) enter_cal_gain(s);   // saved-on source must not meet operating gain
     s->devices[0]->set_bias_tee_gpio(0, s->noise_source != 0);
     for (int k = 0; k < NUM_CH; ++k)
         s->devices[0]->set_bias_tee_gpio(k + 1, s->bias_tee[k] != 0);
@@ -521,6 +634,25 @@ static int process(SpcPluginInstance* inst, const SpcData*, uint32_t,
     if (!s->streaming) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         return 0;
+    }
+
+    // A full ring drops samples, and each channel drops a different amount —
+    // which silently breaks the fixed inter-channel alignment everything
+    // coherent downstream depends on. Say so; the calibrator's next
+    // recalibration re-measures and re-aligns.
+    uint64_t dropped = 0;
+    for (int k = 0; k < NUM_CH; ++k)
+        if (s->devices[k]) dropped += s->devices[k]->dropped_samples();
+    if (dropped != s->dropped_reported) {
+        const auto now_t = std::chrono::steady_clock::now();
+        if (now_t - s->last_drop_log > std::chrono::seconds(5)) {
+            s->last_drop_log = now_t;
+            SPC_LOG_ERROR(&s->host.cached_log,
+                          "KrakenSDR: ring overflow — %llu samples dropped (consumer stalled). "
+                          "Channel alignment is broken until the calibrator recalibrates",
+                          static_cast<unsigned long long>(dropped - s->dropped_reported));
+        }
+        s->dropped_reported = dropped;
     }
 
     // Lockstep gate: only emit when every channel has a full batch buffered, so

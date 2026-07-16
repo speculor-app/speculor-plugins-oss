@@ -51,14 +51,23 @@ uses one universal gain).
 | `bandwidth` | int, Hz | 0 (auto) | IF bandwidth; 0 = matched to sample rate. |
 | `agc_enabled` | bool | false | Leave off for coherent capture (manual gain). |
 | `mgc_gain` | float, dB | 30 | Universal manual gain, snapped to the nearest hardware step (active when AGC is off). |
+| `cal_gain_db` | float, dB | −1 (auto) | Gain applied to all five tuners **while the noise source is on**, restored when it turns off. The burst replaces the antennas, so the operating gain — set for weak off-air signals — rails the 8-bit ADC (measured 34.8 % clipped samples) and degrades the calibrator's phase estimate. −1 = automatic per-band value from heimdall's calibration gain table (8.7 dB at 100 MHz … 49.6 dB at 700 MHz+). |
 | `freq_correction` | int, PPM | 0 | Correction for the shared TCXO. |
+| `dithering` | bool | false | R820T2 PLL sigma-delta dithering. **Leave off for a coherent array**: with it on, each tuner's phase drifts independently and the array decorrelates itself (A/B-verified on hardware: off locks at 0.85+, on drops one channel to 0.02). Applied before tuning — librtlsdr only latches it into the next PLL programming. R820T-only; a V4's R828D rejects the call. |
 | `noise_source` | bool | false | Toggle the onboard calibration noise source (control-dongle **GPIO 0**) — a common tone into all channels, for a calibration node. |
 | `bias_tee_ch0..4` | bool ×5 | false | 4.5 V bias-tee per SMA port (control-dongle **GPIO 1..5**). **PREVIEW — verify routing.** |
 | `relax_serial_match` | bool | false | If serials 1000–1004 aren't found, use the first 5 RTL devices (reflashed units; reference channel not guaranteed). |
 
 Single-tuner debug knobs (`direct_sampling`, `offset_tuning`, `if_gain`, `test_mode`)
 are intentionally omitted — they are per-tuner HF/debug features irrelevant to a
-coherent VHF/UHF array. `dithering` is not a user knob; it is forced off.
+coherent VHF/UHF array.
+
+Changing `sample_rate` or `bandwidth` while streaming logs a warning: a rate change
+soft-resets each channel's demodulator at a different instant, and a bandwidth change
+re-tunes each PLL (the filter moves the IF) at a new random phase — either way the
+array's alignment/phase calibration is stale until the calibrator's next pass. A
+`center_freq` change is detected by the calibrator itself (the new frequency arrives
+in the block metadata) and forces a recalibration automatically.
 
 ## Outputs
 
@@ -76,13 +85,14 @@ present it produces nothing and logs the shortfall; a **Scan** re-runs detection
 five enumerated devices, in which case the reference-channel mapping is not
 guaranteed). Multiple Krakens on one host are unsupported (their serials collide).
 
-## GPIO assumptions (verify on your board)
+## GPIO map (verified)
 
 All GPIO is driven on the **channel-0 control dongle** via `rtlsdr_set_bias_tee_gpio`:
-noise source on GPIO 0, per-channel bias tees on GPIO 1–5. This matches the KrakenSDR
-switch-matrix wiring but is **not hardware-verified here** — confirm the tone appears
-on all five channels and that each `bias_tee_chN` energizes the right SMA port, and
-adjust the pin mapping if your unit differs.
+noise source on GPIO 0, per-channel bias tees on GPIO 1–5. This matches KrakenRF's own
+DAQ firmware (heimdall `rtl_daq.c` drives the noise source as GPIO 0 and channel-m
+bias tees as GPIO m+1, all on the control device), and the noise-source path is
+hardware-verified — the calibrator locks through it. The per-port bias-tee routing
+remains PREVIEW: confirm each `bias_tee_chN` energizes the right SMA port.
 
 Bias tees are re-applied from parameters at every **Start** (not explicitly cleared at
 Stop; Stop clears each dongle's own GPIO 0 as part of the guarded teardown).
@@ -94,6 +104,17 @@ Stop; Stop clears each dongle's own GPIO 0 as part of the guarded teardown).
 - **USB / power.** Five channels at 2.4 MSPS ≈ 24 MB/s over the Kraken's internal USB
   2.0 hub (fits), but the unit needs a solid **5 V / 2.4 A+** supply; under-power or a
   weak hub causes dropped samples. Lower `sample_rate` if you see drops.
+- **Overflow is loud, because it must be.** If the pipeline stalls long enough for a
+  channel's ring to fill (~0.9 s at 2.4 MSPS), samples drop — and each channel drops a
+  *different* amount, which silently breaks the fixed inter-channel alignment. The
+  plugin counts refused samples per channel and logs an ERROR when it happens; the
+  calibrator's next recalibration measures the shifted delays and re-aligns.
+- **Read-back verification.** After configuring, each tuner is asked what it actually
+  did (`rtlsdr_get_center_freq`/`_get_sample_rate`) — a channel that silently refused
+  its frequency is otherwise indistinguishable from one with a dead antenna. Note the
+  library reports the *requested* frequency back; the PLL's actual grid snap (up to
+  ~±220 Hz, identical across all five tuners, cancelling in any cross-correlation) is
+  not visible through this API.
 - Opening the array is all-or-nothing: if any of the five channels fails to open,
   `start()` fails rather than streaming a partial (useless) array.
 

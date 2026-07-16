@@ -146,6 +146,13 @@ public:
     // full batch before reading equal counts from each)
     [[nodiscard]] uint32_t available() const { return ring_ ? spc_ring_available(ring_) : 0; }
 
+    // Samples the ring refused because it was full (consumer stalled). For a
+    // coherent array this is not just data loss: each channel drops a different
+    // amount, so the fixed inter-channel alignment is broken until recalibrated.
+    [[nodiscard]] uint64_t dropped_samples() const {
+        return dropped_.load(std::memory_order_relaxed);
+    }
+
     // enumeration
     static std::vector<RtlSdrDeviceInfo> enumerate();
 
@@ -167,6 +174,7 @@ private:
     rtlsdr_dev_t* dev_ = nullptr;
     SpcRingBuffer* ring_ = nullptr;
     std::atomic<bool> streaming_{false};
+    std::atomic<uint64_t> dropped_{0};
     std::thread read_thread_;
     bool is_v4_ = false;
 
