@@ -150,7 +150,7 @@ static const SpcPluginDescriptor* scan_devices(const SpcHostServices* svc)
 static const SpcPluginDescriptor* get_descriptor()
 {
     if (!g_desc_initialized) {
-        spc::DescriptorBuilder("kraken_sdr", "KrakenSDR", "Signal/SDR/Sources")
+        spc::DescriptorBuilder("kraken_sdr", "KrakenSDR", "Signal/SDR/Passive Radar/Sources")
             .author("Speculor").version("0.1.0")
             .data_source()
             .description("Streams five coherent I/Q channels from a KrakenSDR "
