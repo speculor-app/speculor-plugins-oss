@@ -107,8 +107,17 @@ Stop; Stop clears each dongle's own GPIO 0 as part of the guarded teardown).
 - **Overflow is loud, because it must be.** If the pipeline stalls long enough for a
   channel's ring to fill (~0.9 s at 2.4 MSPS), samples drop — and each channel drops a
   *different* amount, which silently breaks the fixed inter-channel alignment. The
-  plugin counts refused samples per channel and logs an ERROR when it happens; the
-  calibrator's next recalibration measures the shifted delays and re-aligns.
+  plugin logs an ERROR with the **per-channel** drop counts, so one sick dongle is named
+  rather than hidden in a total; the calibrator's next recalibration measures the
+  shifted delays and re-aligns.
+- **A dead channel is restarted, not waited on.** The lockstep gate blocks until every
+  channel has a full batch, so one wedged dongle silences the whole array. A channel
+  that delivers nothing for 5 s while a sibling's ring sits full gets its async read
+  cancelled and restarted in place (30 s backoff between attempts) — no physical access
+  needed, which matters for a remotely operated mast. The restarted stream begins at a
+  new startup skew, which the calibrator's next pass re-measures. If *no* channel is
+  delivering, that is a device/hub/power-level failure and the log says so instead of
+  restart-thrashing all five.
 - **Calibration gain flips don't stall the stream.** Entering/leaving the calibration
   gain around a noise burst touches all five tuners *concurrently* (one USB round, not
   five serial ones), and a re-sent `noise_source` command that doesn't change state is

@@ -115,10 +115,21 @@ struct KrakenSdrState {
     uint64_t block_index = 0;
     bool streaming = false;
 
-    // overflow reporting (each channel dropping a different amount breaks the
-    // fixed inter-channel alignment)
-    uint64_t dropped_reported = 0;
+    // Overflow reporting (each channel dropping a different amount breaks the
+    // fixed inter-channel alignment). Counted per channel against a baseline:
+    // a restarted stream resets its device counter, which an aggregate sum
+    // would read as a huge bogus delta.
+    uint64_t drop_seen[NUM_CH] = {};
+    uint64_t drop_pending[NUM_CH] = {};
     std::chrono::steady_clock::time_point last_drop_log{};
+
+    // Dead-channel watchdog. One wedged dongle blocks the lockstep gate for
+    // the whole array — and this rig may be operated remotely, where
+    // "reseat the cable" is not an option.
+    uint32_t last_avail[NUM_CH] = {};
+    std::chrono::steady_clock::time_point last_progress[NUM_CH];
+    std::chrono::steady_clock::time_point last_restart[NUM_CH];
+    std::chrono::steady_clock::time_point all_dead_log{};
 };
 
 SPC_PLUGIN_CAST(KrakenSdrState)
@@ -519,8 +530,16 @@ static int start(SpcPluginInstance* inst)
 {
     auto* s = state(inst);
     s->block_index = 0;
-    s->dropped_reported = 0;
     s->last_drop_log = {};
+    s->all_dead_log = {};
+    const auto now_t = std::chrono::steady_clock::now();
+    for (int k = 0; k < NUM_CH; ++k) {
+        s->drop_seen[k] = 0;
+        s->drop_pending[k] = 0;
+        s->last_avail[k] = 0;
+        s->last_progress[k] = now_t;
+        s->last_restart[k] = {};
+    }
 
     if (!spc::rtlsdr::RtlSdrDevice::load_api()) {
         SPC_LOG_ERROR(&s->host.cached_log, "KrakenSDR: rtlsdr library not available");
@@ -672,33 +691,94 @@ static int process(SpcPluginInstance* inst, const SpcData*, uint32_t,
         return 0;
     }
 
+    const auto now_t = std::chrono::steady_clock::now();
+
     // A full ring drops samples, and each channel drops a different amount —
     // which silently breaks the fixed inter-channel alignment everything
-    // coherent downstream depends on. Say so; the calibrator's next
-    // recalibration re-measures and re-aligns.
-    uint64_t dropped = 0;
-    for (int k = 0; k < NUM_CH; ++k)
-        if (s->devices[k]) dropped += s->devices[k]->dropped_samples();
-    if (dropped != s->dropped_reported) {
-        const auto now_t = std::chrono::steady_clock::now();
-        if (now_t - s->last_drop_log > std::chrono::seconds(5)) {
-            s->last_drop_log = now_t;
-            SPC_LOG_ERROR(&s->host.cached_log,
-                          "KrakenSDR: ring overflow — %llu samples dropped (consumer stalled). "
-                          "Channel alignment is broken until the calibrator recalibrates",
-                          static_cast<unsigned long long>(dropped - s->dropped_reported));
+    // coherent downstream depends on. Say so, per channel, so a single sick
+    // dongle is named rather than hidden in an aggregate; the calibrator's
+    // next recalibration re-measures and re-aligns.
+    bool any_drop = false;
+    for (int k = 0; k < NUM_CH; ++k) {
+        if (!s->devices[k]) continue;
+        const uint64_t cur = s->devices[k]->dropped_samples();
+        if (cur < s->drop_seen[k]) s->drop_seen[k] = 0;   // stream was restarted
+        if (cur > s->drop_seen[k]) {
+            s->drop_pending[k] += cur - s->drop_seen[k];
+            s->drop_seen[k] = cur;
         }
-        s->dropped_reported = dropped;
+        if (s->drop_pending[k] != 0) any_drop = true;
+    }
+    if (any_drop && now_t - s->last_drop_log > std::chrono::seconds(5)) {
+        s->last_drop_log = now_t;
+        SPC_LOG_ERROR(&s->host.cached_log,
+                      "KrakenSDR: ring overflow — dropped ch0 %llu, ch1 %llu, ch2 %llu, ch3 %llu, "
+                      "ch4 %llu samples since the last report (consumer stalled, or a dead channel "
+                      "blocking the lockstep gate). Channel alignment is broken until the "
+                      "calibrator recalibrates",
+                      static_cast<unsigned long long>(s->drop_pending[0]),
+                      static_cast<unsigned long long>(s->drop_pending[1]),
+                      static_cast<unsigned long long>(s->drop_pending[2]),
+                      static_cast<unsigned long long>(s->drop_pending[3]),
+                      static_cast<unsigned long long>(s->drop_pending[4]));
+        for (int k = 0; k < NUM_CH; ++k) s->drop_pending[k] = 0;
     }
 
     // Lockstep gate: only emit when every channel has a full batch buffered, so
     // each block is equal-size and time-corresponding across all five ports.
     // The shared clock keeps the equal-rate rings aligned modulo the fixed
     // startup offset, so this never starves in steady state.
+    uint32_t avail[NUM_CH];
     uint32_t ready = BATCH_SIZE;
-    for (int k = 0; k < NUM_CH; ++k)
-        ready = std::min(ready, s->devices[k] ? s->devices[k]->available() : 0u);
+    for (int k = 0; k < NUM_CH; ++k) {
+        avail[k] = s->devices[k] ? s->devices[k]->available() : 0u;
+        ready = std::min(ready, avail[k]);
+        // a full ring counts as progress: it is the gate holding it back, not
+        // the dongle
+        if (avail[k] >= BATCH_SIZE || avail[k] != s->last_avail[k])
+            s->last_progress[k] = now_t;
+        s->last_avail[k] = avail[k];
+    }
     if (ready < BATCH_SIZE) {
+        // A channel that has produced nothing for seconds while a sibling's
+        // ring sits full is wedged, not slow — and it blocks the gate for the
+        // whole array. Cancel and restart just that channel's async read; the
+        // new stream starts at a fresh skew, which the calibrator's next pass
+        // re-measures.
+        bool sibling_flowing = false;
+        for (int k = 0; k < NUM_CH; ++k)
+            if (avail[k] >= BATCH_SIZE) { sibling_flowing = true; break; }
+        for (int k = 0; k < NUM_CH; ++k) {
+            if (!s->devices[k]) continue;
+            const auto stalled = now_t - s->last_progress[k];
+            if (stalled < std::chrono::seconds(5)) continue;
+            if (!sibling_flowing) {
+                if (now_t - s->all_dead_log > std::chrono::seconds(30)) {
+                    s->all_dead_log = now_t;
+                    SPC_LOG_ERROR(&s->host.cached_log,
+                                  "KrakenSDR: no channel is delivering samples — a device, hub or "
+                                  "power failure below the per-channel level. Restart the pipeline; "
+                                  "if that does not recover it, the unit needs a power-cycle");
+                }
+                break;
+            }
+            if (now_t - s->last_restart[k] < std::chrono::seconds(30)) continue;
+            s->last_restart[k] = now_t;
+            SPC_LOG_ERROR(&s->host.cached_log,
+                          "KrakenSDR: ch%d has delivered nothing for %lld s while other channels "
+                          "flow — restarting its stream. Channel alignment is broken until the "
+                          "calibrator recalibrates",
+                          k,
+                          static_cast<long long>(
+                              std::chrono::duration_cast<std::chrono::seconds>(stalled).count()));
+            s->devices[k]->stop_streaming();
+            if (!s->devices[k]->start_streaming())
+                SPC_LOG_ERROR(&s->host.cached_log,
+                              "KrakenSDR: ch%d stream restart failed — the dongle is not responding; "
+                              "the unit needs a power-cycle", k);
+            s->drop_seen[k] = 0;
+            s->last_progress[k] = now_t;   // fresh grace period for the new stream
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
         return 0;
     }
