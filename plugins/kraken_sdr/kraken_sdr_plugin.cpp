@@ -676,6 +676,11 @@ static int start(SpcPluginInstance* inst)
         }
     }
 
+    // The health window must start where the data starts: start() spends
+    // seconds opening and tuning five dongles, and counting that dead time
+    // against the first window's inflow reads a healthy array as all-stalled.
+    s->health_window_start = std::chrono::steady_clock::now();
+
     s->streaming = true;
     SPC_LOG_INFO(&s->host.cached_log,
                  "KrakenSDR started (%d ch, freq=%d Hz, rate=%u Hz, noise_src=%d)",
