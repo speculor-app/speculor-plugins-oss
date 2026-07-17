@@ -151,7 +151,7 @@ static const SpcPluginDescriptor* get_descriptor()
 {
     if (!g_desc_initialized) {
         spc::DescriptorBuilder("kraken_sdr", "KrakenSDR", "Signal/SDR/Passive Radar/Sources")
-            .author("Speculor").version("0.1.0")
+            .author("Speculor").version("0.1.1")
             .data_source()
             .description("Streams five coherent I/Q channels from a KrakenSDR "
                          "(5x R820T2 coherent RTL-SDR array). Frequency-coherent "
@@ -281,13 +281,29 @@ static int snap_gain_tenths(float gain_db)
     return target;
 }
 
+// Run a per-tuner operation on all five tuners concurrently and join. Each
+// dongle is its own USB device (own handle, own endpoints), so the control
+// transfers don't contend — serially the five rounds add up to >100 ms, which
+// around a calibration burst is long enough to stall draining and overflow
+// the rings of every coherent consumer downstream.
+template <typename F>
+static void for_each_tuner_parallel(KrakenSdrState* s, F&& fn)
+{
+    std::thread threads[NUM_CH];
+    for (int k = 0; k < NUM_CH; ++k)
+        if (s->devices[k]) threads[k] = std::thread(fn, k, s->devices[k].get());
+    for (auto& t : threads)
+        if (t.joinable()) t.join();
+}
+
 // Apply the universal manual gain to every open tuner (the Kraken uses one
 // "universal gain" across all five).
 static void apply_gain_all(KrakenSdrState* s)
 {
     const int target = snap_gain_tenths(s->gain_db);
-    for (int k = 0; k < NUM_CH; ++k)
-        if (s->devices[k]) s->devices[k]->set_tuner_gain(target);
+    for_each_tuner_parallel(s, [target](int, spc::rtlsdr::RtlSdrDevice* d) {
+        d->set_tuner_gain(target);
+    });
 }
 
 // heimdall's per-band calibration gain (hw_controller.py cal_gain_table,
@@ -316,17 +332,20 @@ static void enter_cal_gain(KrakenSdrState* s)
     const float db = (s->cal_gain_db >= 0.0f) ? s->cal_gain_db
                                               : auto_cal_gain_db(s->center_freq);
     const int target = snap_gain_tenths(db);
+    const bool agc = s->agc_enabled != 0;
+    bool ok[NUM_CH] = {true, true, true, true, true};
+    for_each_tuner_parallel(s, [&](int k, spc::rtlsdr::RtlSdrDevice* d) {
+        if (agc) d->set_agc(false);   // amplitude cal needs fixed gain
+        d->set_tuner_gain_mode(true);
+        ok[k] = d->set_tuner_gain(target);
+    });
     bool all_ok = true;
     for (int k = 0; k < NUM_CH; ++k) {
-        if (!s->devices[k]) continue;
-        if (s->agc_enabled) s->devices[k]->set_agc(false);   // amplitude cal needs fixed gain
-        s->devices[k]->set_tuner_gain_mode(true);
-        if (!s->devices[k]->set_tuner_gain(target)) {
-            all_ok = false;
-            SPC_LOG_ERROR(&s->host.cached_log,
-                          "KrakenSDR: ch%d refused calibration gain %.1f dB — its burst may clip", k,
-                          static_cast<double>(target) / 10.0);
-        }
+        if (ok[k]) continue;
+        all_ok = false;
+        SPC_LOG_ERROR(&s->host.cached_log,
+                      "KrakenSDR: ch%d refused calibration gain %.1f dB — its burst may clip", k,
+                      static_cast<double>(target) / 10.0);
     }
     if (all_ok)
         SPC_LOG_INFO(&s->host.cached_log,
@@ -337,14 +356,14 @@ static void enter_cal_gain(KrakenSdrState* s)
 
 static void leave_cal_gain(KrakenSdrState* s)
 {
-    for (int k = 0; k < NUM_CH; ++k) {
-        if (!s->devices[k]) continue;
-        if (s->agc_enabled) {
-            s->devices[k]->set_agc(true);
-            s->devices[k]->set_tuner_gain_mode(false);
-        }
+    if (s->agc_enabled) {
+        for_each_tuner_parallel(s, [](int, spc::rtlsdr::RtlSdrDevice* d) {
+            d->set_agc(true);
+            d->set_tuner_gain_mode(false);
+        });
+    } else {
+        apply_gain_all(s);
     }
-    if (!s->agc_enabled) apply_gain_all(s);
     SPC_LOG_INFO(&s->host.cached_log, "KrakenSDR: operating gain restored (%s)",
                  s->agc_enabled ? "AGC" : "manual");
 }
@@ -424,8 +443,11 @@ static int set_parameter(SpcPluginInstance* inst, const char* name,
             if (s->devices[k]) s->devices[k]->set_freq_correction(s->freq_correction);
         return 0;
     }
+    const int32_t noise_prev = s->noise_source;
     if (spc::try_set_bool(name, value, "noise_source", s->noise_source)) {
-        if (ctrl) {
+        // The calibrator re-sends OFF freely (on every recalibration restart);
+        // only a real transition may pay the five-tuner gain round.
+        if (ctrl && s->noise_source != noise_prev) {
             // low gain before the switch flips, operating gain only after it
             // flips back — the burst must never meet the operating gain
             if (s->noise_source) enter_cal_gain(s);

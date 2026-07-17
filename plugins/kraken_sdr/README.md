@@ -109,6 +109,13 @@ Stop; Stop clears each dongle's own GPIO 0 as part of the guarded teardown).
   *different* amount, which silently breaks the fixed inter-channel alignment. The
   plugin counts refused samples per channel and logs an ERROR when it happens; the
   calibrator's next recalibration measures the shifted delays and re-aligns.
+- **Calibration gain flips don't stall the stream.** Entering/leaving the calibration
+  gain around a noise burst touches all five tuners *concurrently* (one USB round, not
+  five serial ones), and a re-sent `noise_source` command that doesn't change state is
+  a no-op — a calibrator can re-send OFF liberally without paying a gain round each
+  time. This matters because a gain round suspends draining: made serial, each burst
+  stalls the stream long enough to overflow downstream rings, so every calibration
+  would cause the misalignment the next one exists to fix.
 - **Read-back verification.** After configuring, each tuner is asked what it actually
   did (`rtlsdr_get_center_freq`/`_get_sample_rate`) — a channel that silently refused
   its frequency is otherwise indistinguishable from one with a dead antenna. Note the
