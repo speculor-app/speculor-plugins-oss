@@ -10,6 +10,7 @@
 #include <cstring>
 #include <memory>
 #include <thread>
+#include <vector>
 
 // KrakenSDR (KrakenRF) — a 5-channel coherent RTL-SDR array (5x R820T2 +
 // RTL2832U sharing one 28.8 MHz TCXO). This is a direct capture driver: it
@@ -123,11 +124,18 @@ struct KrakenSdrState {
     uint64_t drop_pending[NUM_CH] = {};
     std::chrono::steady_clock::time_point last_drop_log{};
 
-    // Dead-channel watchdog. One wedged dongle blocks the lockstep gate for
+    // Sick-channel watchdog. One failing dongle paces the lockstep gate for
     // the whole array — and this rig may be operated remotely, where
-    // "reseat the cable" is not an option.
+    // "reseat the cable" is not an option. Health is a delivery RATE over a
+    // window, not ring activity: a dying dongle usually trickles rather than
+    // stops, and a trickle changes the ring every tick while starving the
+    // array. Refused (dropped) samples count as delivered, so downstream
+    // backpressure does not read as a sick channel.
     uint32_t last_avail[NUM_CH] = {};
-    std::chrono::steady_clock::time_point last_progress[NUM_CH];
+    uint64_t inflow_accum[NUM_CH] = {};
+    bool read_last[NUM_CH] = {};
+    bool stalled_ch[NUM_CH] = {};
+    std::chrono::steady_clock::time_point health_window_start{};
     std::chrono::steady_clock::time_point last_restart[NUM_CH];
     std::chrono::steady_clock::time_point all_dead_log{};
     // escalation ladder per channel: 0 = try a stream restart next, 1 = the
@@ -136,6 +144,7 @@ struct KrakenSdrState {
     // a dead channel is taken out of the lockstep gate and its port emits
     // zeros, so the healthy channels keep the array running while it revives
     bool zero_fill[NUM_CH] = {};
+    std::vector<int16_t> flush_buf;   // discard buffer for a rejoin's stale backlog
 };
 
 SPC_PLUGIN_CAST(KrakenSdrState)
@@ -539,11 +548,14 @@ static int start(SpcPluginInstance* inst)
     s->last_drop_log = {};
     s->all_dead_log = {};
     const auto now_t = std::chrono::steady_clock::now();
+    s->health_window_start = now_t;
     for (int k = 0; k < NUM_CH; ++k) {
         s->drop_seen[k] = 0;
         s->drop_pending[k] = 0;
         s->last_avail[k] = 0;
-        s->last_progress[k] = now_t;
+        s->inflow_accum[k] = 0;
+        s->read_last[k] = false;
+        s->stalled_ch[k] = false;
         s->last_restart[k] = {};
         s->revive_level[k] = 0;
         s->zero_fill[k] = false;
@@ -751,12 +763,14 @@ static int process(SpcPluginInstance* inst, const SpcData*, uint32_t,
     // dongle is named rather than hidden in an aggregate; the calibrator's
     // next recalibration re-measures and re-aligns.
     bool any_drop = false;
+    uint64_t tick_drop[NUM_CH] = {};
     for (int k = 0; k < NUM_CH; ++k) {
         if (!s->devices[k]) continue;
         const uint64_t cur = s->devices[k]->dropped_samples();
         if (cur < s->drop_seen[k]) s->drop_seen[k] = 0;   // stream was restarted
         if (cur > s->drop_seen[k]) {
-            s->drop_pending[k] += cur - s->drop_seen[k];
+            tick_drop[k] = cur - s->drop_seen[k];
+            s->drop_pending[k] += tick_drop[k];
             s->drop_seen[k] = cur;
         }
         if (s->drop_pending[k] != 0) any_drop = true;
@@ -776,19 +790,38 @@ static int process(SpcPluginInstance* inst, const SpcData*, uint32_t,
         for (int k = 0; k < NUM_CH; ++k) s->drop_pending[k] = 0;
     }
 
-    // Per-channel health. A full ring counts as progress: it is the gate
-    // holding it back, not the dongle.
+    // Per-channel delivery accounting: what the dongle produced this tick is
+    // the ring-level change, plus what last tick's batch read consumed, plus
+    // what the full ring refused.
     uint32_t avail[NUM_CH];
-    bool stalled[NUM_CH];
-    int stalled_count = 0;
     for (int k = 0; k < NUM_CH; ++k) {
         avail[k] = s->devices[k] ? s->devices[k]->available() : 0u;
-        if (avail[k] >= BATCH_SIZE || avail[k] != s->last_avail[k])
-            s->last_progress[k] = now_t;
+        const int64_t delta = static_cast<int64_t>(avail[k]) -
+                              static_cast<int64_t>(s->last_avail[k]) +
+                              (s->read_last[k] ? static_cast<int64_t>(BATCH_SIZE) : 0);
+        if (delta > 0) s->inflow_accum[k] += static_cast<uint64_t>(delta);
+        s->inflow_accum[k] += tick_drop[k];
         s->last_avail[k] = avail[k];
-        stalled[k] = (now_t - s->last_progress[k]) > std::chrono::seconds(5);
-        if (stalled[k]) ++stalled_count;
+        s->read_last[k] = false;
     }
+
+    // Health verdicts once per window: healthy means at least half the nominal
+    // rate actually delivered. A dying dongle usually trickles rather than
+    // stops, and a trickle would pace the lockstep gate — and the whole
+    // array — at its crawl.
+    const auto window = now_t - s->health_window_start;
+    if (window >= std::chrono::seconds(5)) {
+        const double secs = std::chrono::duration<double>(window).count();
+        const auto needed = static_cast<uint64_t>(s->actual_sample_rate * secs * 0.5);
+        for (int k = 0; k < NUM_CH; ++k) {
+            s->stalled_ch[k] = s->devices[k] && s->inflow_accum[k] < needed;
+            s->inflow_accum[k] = 0;
+        }
+        s->health_window_start = now_t;
+    }
+    int stalled_count = 0;
+    for (int k = 0; k < NUM_CH; ++k)
+        if (s->stalled_ch[k]) ++stalled_count;
 
     // Degrade before failing: a dead channel leaves the lockstep gate and its
     // port emits zeros, so the healthy channels keep the array detecting (a
@@ -798,16 +831,30 @@ static int process(SpcPluginInstance* inst, const SpcData*, uint32_t,
     // calibrator's delay search, where a blocked array's ~1 s backlog is not.
     for (int k = 0; k < NUM_CH; ++k) {
         if (!s->devices[k]) continue;
-        if (!s->zero_fill[k] && stalled[k] && stalled_count < NUM_CH) {
+        if (!s->zero_fill[k] && s->stalled_ch[k] && stalled_count < NUM_CH) {
             s->zero_fill[k] = true;
             SPC_LOG_ERROR(&s->host.cached_log,
-                          "KrakenSDR: ch%d has stopped delivering — zero-filling its port so the "
-                          "array keeps running (%s). Revive attempts continue in the background",
+                          "KrakenSDR: ch%d is delivering below half rate — zero-filling its port "
+                          "so the array keeps running (%s). Revive attempts continue in the "
+                          "background",
                           k,
                           k == 0 ? "ch0 is the REFERENCE, so detection is blind until it recovers"
                                  : "detection continues at reduced sensitivity; bearings degrade "
                                    "until it recovers");
-        } else if (s->zero_fill[k] && avail[k] >= BATCH_SIZE) {
+        } else if (s->zero_fill[k] && !s->stalled_ch[k] && avail[k] >= BATCH_SIZE) {
+            // rejoin only once the delivery RATE is back — a trickle fills an
+            // undrained ring too. The dead period's backlog is stale and
+            // discontinuous, so keep just the freshest batch.
+            if (avail[k] > BATCH_SIZE) {
+                const uint32_t excess = avail[k] - BATCH_SIZE;
+                s->flush_buf.resize(static_cast<size_t>(BATCH_SIZE) * 2);
+                uint32_t left = excess;
+                while (left > 0) {
+                    const uint32_t n = std::min(left, BATCH_SIZE);
+                    s->devices[k]->read_iq(s->flush_buf.data(), n);
+                    left -= n;
+                }
+            }
             s->zero_fill[k] = false;
             s->revive_level[k] = 0;
             SPC_LOG_WARN(&s->host.cached_log,
@@ -828,18 +875,16 @@ static int process(SpcPluginInstance* inst, const SpcData*, uint32_t,
         }
     } else {
         for (int k = 0; k < NUM_CH; ++k) {
-            if (!s->devices[k] || !stalled[k]) continue;
+            if (!s->devices[k] || !s->stalled_ch[k]) continue;
             if (now_t - s->last_restart[k] < std::chrono::seconds(30)) continue;
             s->last_restart[k] = now_t;
-            const auto stalled_s = static_cast<long long>(
-                std::chrono::duration_cast<std::chrono::seconds>(now_t - s->last_progress[k]).count());
             if (s->revive_level[k] == 0) {
                 s->revive_level[k] = 1;
                 SPC_LOG_ERROR(&s->host.cached_log,
-                              "KrakenSDR: ch%d has delivered nothing for %lld s while other "
-                              "channels flow — restarting its stream. Channel alignment is broken "
-                              "until the calibrator recalibrates",
-                              k, stalled_s);
+                              "KrakenSDR: ch%d is delivering below half rate while other channels "
+                              "flow — restarting its stream. Channel alignment is broken until "
+                              "the calibrator recalibrates",
+                              k);
                 s->devices[k]->stop_streaming();
                 if (!s->devices[k]->start_streaming())
                     SPC_LOG_ERROR(&s->host.cached_log,
@@ -859,7 +904,10 @@ static int process(SpcPluginInstance* inst, const SpcData*, uint32_t,
                                   "instance USB\\VID_0BDA&PID_2838\\%d), else power-cycle the unit",
                                   k, KRAKEN_SERIAL_BASE + k);
             }
-            s->last_progress[k] = now_t;   // fresh grace period for the new stream
+            // grace for the new stream: clear the verdict and let the next
+            // full window re-measure it
+            s->stalled_ch[k] = false;
+            s->inflow_accum[k] = 0;
         }
     }
 
@@ -882,11 +930,13 @@ static int process(SpcPluginInstance* inst, const SpcData*, uint32_t,
 
     for (int k = 0; k < NUM_CH; ++k) {
         if (spc_table_resize(&s->tables[k], BATCH_SIZE) != 0) return -1;
-        if (s->zero_fill[k])
+        if (s->zero_fill[k]) {
             std::memset(s->tables[k].data, 0,
                         static_cast<size_t>(BATCH_SIZE) * sizeof(int16_t) * 2);
-        else
+        } else {
             s->devices[k]->read_iq(reinterpret_cast<int16_t*>(s->tables[k].data), BATCH_SIZE);
+            s->read_last[k] = true;
+        }
 
         // shared metadata + shared frame_number/timestamp so a downstream
         // correlator can pair reference/surveillance samples of the same block
