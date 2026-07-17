@@ -110,14 +110,24 @@ Stop; Stop clears each dongle's own GPIO 0 as part of the guarded teardown).
   plugin logs an ERROR with the **per-channel** drop counts, so one sick dongle is named
   rather than hidden in a total; the calibrator's next recalibration measures the
   shifted delays and re-aligns.
-- **A dead channel is restarted, not waited on.** The lockstep gate blocks until every
+- **A dead channel is revived, not waited on.** The lockstep gate blocks until every
   channel has a full batch, so one wedged dongle silences the whole array. A channel
-  that delivers nothing for 5 s while a sibling's ring sits full gets its async read
-  cancelled and restarted in place (30 s backoff between attempts) — no physical access
-  needed, which matters for a remotely operated mast. The restarted stream begins at a
-  new startup skew, which the calibrator's next pass re-measures. If *no* channel is
-  delivering, that is a device/hub/power-level failure and the log says so instead of
-  restart-thrashing all five.
+  that delivers nothing for 5 s while a sibling's ring sits full is revived in place,
+  escalating with a 30 s backoff between attempts — no physical access needed, which
+  matters for a remotely operated mast:
+  1. **stream restart** — cancel and restart its async read (clears wedged transfers);
+  2. **device reopen** — close and reopen the dongle (re-detected by serial, full
+     RTL2832U/tuner re-init and reconfiguration; ch0 also gets its noise-source and
+     bias-tee GPIO state restored). This is the closest software gets to a per-channel
+     power-cycle: the five dongles share one rail behind the internal hub, with no
+     per-port power switching for a host to command.
+  3. If the reopen fails the dongle is off the bus; the log names the remaining remote
+     option — a driver-level disable/enable (`pnputil`, instance
+     `USB\VID_0BDA&PID_2838\<serial>`) — before a physical power-cycle.
+
+  A revived stream begins at a new startup skew, which the calibrator's next pass
+  re-measures. If *no* channel is delivering, that is a device/hub/power-level failure
+  and the log says so instead of restart-thrashing all five.
 - **Calibration gain flips don't stall the stream.** Entering/leaving the calibration
   gain around a noise burst touches all five tuners *concurrently* (one USB round, not
   five serial ones), and a re-sent `noise_source` command that doesn't change state is

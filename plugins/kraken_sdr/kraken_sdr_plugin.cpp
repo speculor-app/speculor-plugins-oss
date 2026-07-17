@@ -130,6 +130,9 @@ struct KrakenSdrState {
     std::chrono::steady_clock::time_point last_progress[NUM_CH];
     std::chrono::steady_clock::time_point last_restart[NUM_CH];
     std::chrono::steady_clock::time_point all_dead_log{};
+    // escalation ladder per channel: 0 = try a stream restart next, 1 = the
+    // restart did not hold, try a full device reopen next
+    int revive_level[NUM_CH] = {};
 };
 
 SPC_PLUGIN_CAST(KrakenSdrState)
@@ -539,6 +542,7 @@ static int start(SpcPluginInstance* inst)
         s->last_avail[k] = 0;
         s->last_progress[k] = now_t;
         s->last_restart[k] = {};
+        s->revive_level[k] = 0;
     }
 
     if (!spc::rtlsdr::RtlSdrDevice::load_api()) {
@@ -673,6 +677,50 @@ static int stop(SpcPluginInstance* inst)
     return 0;
 }
 
+// Full per-channel recovery: close and reopen the dongle. rtlsdr_open
+// re-initialises the RTL2832U baseband and the tuner re-locks on re-tune, so
+// this clears everything short of an actual power loss — the closest thing to
+// a per-channel power-cycle the hardware allows (the five dongles share one
+// rail behind the internal hub; there is no per-port power switching).
+// Re-detects by serial rather than trusting the old index: a device that fell
+// off the bus and back may have re-enumerated elsewhere.
+static bool reopen_channel(KrakenSdrState* s, int k)
+{
+    s->devices[k].reset();   // cancels + joins the read thread, releases the handle
+
+    uint32_t idx[NUM_CH];
+    if (!detect_kraken(s->relax_serial_match != 0, idx, &s->host.cached_log)) return false;
+
+    auto dev = std::make_unique<spc::rtlsdr::RtlSdrDevice>(&s->host.cached_log);
+    if (!dev->open(idx[k])) return false;
+
+    // same bring-up order as start(): rate, dithering before the tune, tune,
+    // bandwidth, ppm, manual-gain seed (then AGC if enabled)
+    dev->set_sample_rate(static_cast<uint32_t>(s->sample_rate));
+    dev->set_dithering(s->dithering != 0);
+    dev->set_center_freq(static_cast<uint32_t>(s->center_freq));
+    dev->set_bandwidth(static_cast<uint32_t>(s->bandwidth));
+    dev->set_freq_correction(s->freq_correction);
+    dev->set_agc(false);
+    dev->set_tuner_gain_mode(true);
+    dev->set_tuner_gain(snap_gain_tenths(s->gain_db));
+    if (s->agc_enabled) {
+        dev->set_tuner_gain_mode(false);
+        dev->set_agc(true);
+    }
+    s->devices[k] = std::move(dev);
+
+    // channel 0 owns the noise-source and bias-tee GPIO — restore its state
+    if (k == 0) {
+        s->devices[0]->set_bias_tee_gpio(0, s->noise_source != 0);
+        for (int j = 0; j < NUM_CH; ++j)
+            s->devices[0]->set_bias_tee_gpio(j + 1, s->bias_tee[j] != 0);
+    }
+
+    s->drop_seen[k] = 0;
+    return s->devices[k]->start_streaming();
+}
+
 // ── process ─────────────────────────────────────────────────────────
 
 // One direct-call block per channel per tick. 65536 samples ≈ 27 ms @ 2.4 MSPS
@@ -737,6 +785,7 @@ static int process(SpcPluginInstance* inst, const SpcData*, uint32_t,
         // the dongle
         if (avail[k] >= BATCH_SIZE || avail[k] != s->last_avail[k])
             s->last_progress[k] = now_t;
+        if (avail[k] >= BATCH_SIZE) s->revive_level[k] = 0;   // delivering again
         s->last_avail[k] = avail[k];
     }
     if (ready < BATCH_SIZE) {
@@ -764,19 +813,34 @@ static int process(SpcPluginInstance* inst, const SpcData*, uint32_t,
             }
             if (now_t - s->last_restart[k] < std::chrono::seconds(30)) continue;
             s->last_restart[k] = now_t;
-            SPC_LOG_ERROR(&s->host.cached_log,
-                          "KrakenSDR: ch%d has delivered nothing for %lld s while other channels "
-                          "flow — restarting its stream. Channel alignment is broken until the "
-                          "calibrator recalibrates",
-                          k,
-                          static_cast<long long>(
-                              std::chrono::duration_cast<std::chrono::seconds>(stalled).count()));
-            s->devices[k]->stop_streaming();
-            if (!s->devices[k]->start_streaming())
+            const auto stalled_s = static_cast<long long>(
+                std::chrono::duration_cast<std::chrono::seconds>(stalled).count());
+            if (s->revive_level[k] == 0) {
+                s->revive_level[k] = 1;
                 SPC_LOG_ERROR(&s->host.cached_log,
-                              "KrakenSDR: ch%d stream restart failed — the dongle is not responding; "
-                              "the unit needs a power-cycle", k);
-            s->drop_seen[k] = 0;
+                              "KrakenSDR: ch%d has delivered nothing for %lld s while other "
+                              "channels flow — restarting its stream. Channel alignment is broken "
+                              "until the calibrator recalibrates",
+                              k, stalled_s);
+                s->devices[k]->stop_streaming();
+                if (!s->devices[k]->start_streaming())
+                    SPC_LOG_ERROR(&s->host.cached_log,
+                                  "KrakenSDR: ch%d stream restart failed — escalating to a device "
+                                  "reopen at the next attempt", k);
+                s->drop_seen[k] = 0;
+            } else {
+                SPC_LOG_ERROR(&s->host.cached_log,
+                              "KrakenSDR: ch%d did not recover from a stream restart — reopening "
+                              "the device (full tuner re-init, the closest software gets to a "
+                              "per-channel power-cycle)",
+                              k);
+                if (!reopen_channel(s, k))
+                    SPC_LOG_ERROR(&s->host.cached_log,
+                                  "KrakenSDR: ch%d reopen failed — the dongle is off the bus. "
+                                  "Remote options: disable/enable it in Device Manager (pnputil, "
+                                  "instance USB\\VID_0BDA&PID_2838\\%d), else power-cycle the unit",
+                                  k, KRAKEN_SERIAL_BASE + k);
+            }
             s->last_progress[k] = now_t;   // fresh grace period for the new stream
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
