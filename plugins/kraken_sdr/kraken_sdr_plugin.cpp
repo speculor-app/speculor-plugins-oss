@@ -133,6 +133,9 @@ struct KrakenSdrState {
     // escalation ladder per channel: 0 = try a stream restart next, 1 = the
     // restart did not hold, try a full device reopen next
     int revive_level[NUM_CH] = {};
+    // a dead channel is taken out of the lockstep gate and its port emits
+    // zeros, so the healthy channels keep the array running while it revives
+    bool zero_fill[NUM_CH] = {};
 };
 
 SPC_PLUGIN_CAST(KrakenSdrState)
@@ -543,6 +546,7 @@ static int start(SpcPluginInstance* inst)
         s->last_progress[k] = now_t;
         s->last_restart[k] = {};
         s->revive_level[k] = 0;
+        s->zero_fill[k] = false;
     }
 
     if (!spc::rtlsdr::RtlSdrDevice::load_api()) {
@@ -772,49 +776,63 @@ static int process(SpcPluginInstance* inst, const SpcData*, uint32_t,
         for (int k = 0; k < NUM_CH; ++k) s->drop_pending[k] = 0;
     }
 
-    // Lockstep gate: only emit when every channel has a full batch buffered, so
-    // each block is equal-size and time-corresponding across all five ports.
-    // The shared clock keeps the equal-rate rings aligned modulo the fixed
-    // startup offset, so this never starves in steady state.
+    // Per-channel health. A full ring counts as progress: it is the gate
+    // holding it back, not the dongle.
     uint32_t avail[NUM_CH];
-    uint32_t ready = BATCH_SIZE;
+    bool stalled[NUM_CH];
+    int stalled_count = 0;
     for (int k = 0; k < NUM_CH; ++k) {
         avail[k] = s->devices[k] ? s->devices[k]->available() : 0u;
-        ready = std::min(ready, avail[k]);
-        // a full ring counts as progress: it is the gate holding it back, not
-        // the dongle
         if (avail[k] >= BATCH_SIZE || avail[k] != s->last_avail[k])
             s->last_progress[k] = now_t;
-        if (avail[k] >= BATCH_SIZE) s->revive_level[k] = 0;   // delivering again
         s->last_avail[k] = avail[k];
+        stalled[k] = (now_t - s->last_progress[k]) > std::chrono::seconds(5);
+        if (stalled[k]) ++stalled_count;
     }
-    if (ready < BATCH_SIZE) {
-        // A channel that has produced nothing for seconds while a sibling's
-        // ring sits full is wedged, not slow — and it blocks the gate for the
-        // whole array. Cancel and restart just that channel's async read; the
-        // new stream starts at a fresh skew, which the calibrator's next pass
-        // re-measures.
-        bool sibling_flowing = false;
-        for (int k = 0; k < NUM_CH; ++k)
-            if (avail[k] >= BATCH_SIZE) { sibling_flowing = true; break; }
+
+    // Degrade before failing: a dead channel leaves the lockstep gate and its
+    // port emits zeros, so the healthy channels keep the array detecting (a
+    // zero channel adds nothing to a fused surface and fails the bearing
+    // quality gate — reduced sensitivity, not an outage). The continuous
+    // draining this buys also keeps the eventual rejoin offset within the
+    // calibrator's delay search, where a blocked array's ~1 s backlog is not.
+    for (int k = 0; k < NUM_CH; ++k) {
+        if (!s->devices[k]) continue;
+        if (!s->zero_fill[k] && stalled[k] && stalled_count < NUM_CH) {
+            s->zero_fill[k] = true;
+            SPC_LOG_ERROR(&s->host.cached_log,
+                          "KrakenSDR: ch%d has stopped delivering — zero-filling its port so the "
+                          "array keeps running (%s). Revive attempts continue in the background",
+                          k,
+                          k == 0 ? "ch0 is the REFERENCE, so detection is blind until it recovers"
+                                 : "detection continues at reduced sensitivity; bearings degrade "
+                                   "until it recovers");
+        } else if (s->zero_fill[k] && avail[k] >= BATCH_SIZE) {
+            s->zero_fill[k] = false;
+            s->revive_level[k] = 0;
+            SPC_LOG_WARN(&s->host.cached_log,
+                         "KrakenSDR: ch%d rejoined the array — channel alignment is broken until "
+                         "the calibrator recalibrates", k);
+        }
+    }
+
+    // Revive ladder for stalled channels — independent of the gate, so it
+    // keeps working while their ports are zero-filled.
+    if (stalled_count == NUM_CH) {
+        if (now_t - s->all_dead_log > std::chrono::seconds(30)) {
+            s->all_dead_log = now_t;
+            SPC_LOG_ERROR(&s->host.cached_log,
+                          "KrakenSDR: no channel is delivering samples — a device, hub or "
+                          "power failure below the per-channel level. Restart the pipeline; "
+                          "if that does not recover it, the unit needs a power-cycle");
+        }
+    } else {
         for (int k = 0; k < NUM_CH; ++k) {
-            if (!s->devices[k]) continue;
-            const auto stalled = now_t - s->last_progress[k];
-            if (stalled < std::chrono::seconds(5)) continue;
-            if (!sibling_flowing) {
-                if (now_t - s->all_dead_log > std::chrono::seconds(30)) {
-                    s->all_dead_log = now_t;
-                    SPC_LOG_ERROR(&s->host.cached_log,
-                                  "KrakenSDR: no channel is delivering samples — a device, hub or "
-                                  "power failure below the per-channel level. Restart the pipeline; "
-                                  "if that does not recover it, the unit needs a power-cycle");
-                }
-                break;
-            }
+            if (!s->devices[k] || !stalled[k]) continue;
             if (now_t - s->last_restart[k] < std::chrono::seconds(30)) continue;
             s->last_restart[k] = now_t;
             const auto stalled_s = static_cast<long long>(
-                std::chrono::duration_cast<std::chrono::seconds>(stalled).count());
+                std::chrono::duration_cast<std::chrono::seconds>(now_t - s->last_progress[k]).count());
             if (s->revive_level[k] == 0) {
                 s->revive_level[k] = 1;
                 SPC_LOG_ERROR(&s->host.cached_log,
@@ -843,6 +861,19 @@ static int process(SpcPluginInstance* inst, const SpcData*, uint32_t,
             }
             s->last_progress[k] = now_t;   // fresh grace period for the new stream
         }
+    }
+
+    // Lockstep gate over the healthy channels: emit only when every one of
+    // them has a full batch buffered, so blocks stay equal-size and
+    // time-corresponding across all five ports.
+    uint32_t ready = BATCH_SIZE;
+    int healthy = 0;
+    for (int k = 0; k < NUM_CH; ++k) {
+        if (s->zero_fill[k]) continue;
+        ready = std::min(ready, avail[k]);
+        ++healthy;
+    }
+    if (healthy == 0 || ready < BATCH_SIZE) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
         return 0;
     }
@@ -851,7 +882,11 @@ static int process(SpcPluginInstance* inst, const SpcData*, uint32_t,
 
     for (int k = 0; k < NUM_CH; ++k) {
         if (spc_table_resize(&s->tables[k], BATCH_SIZE) != 0) return -1;
-        s->devices[k]->read_iq(reinterpret_cast<int16_t*>(s->tables[k].data), BATCH_SIZE);
+        if (s->zero_fill[k])
+            std::memset(s->tables[k].data, 0,
+                        static_cast<size_t>(BATCH_SIZE) * sizeof(int16_t) * 2);
+        else
+            s->devices[k]->read_iq(reinterpret_cast<int16_t*>(s->tables[k].data), BATCH_SIZE);
 
         // shared metadata + shared frame_number/timestamp so a downstream
         // correlator can pair reference/surveillance samples of the same block

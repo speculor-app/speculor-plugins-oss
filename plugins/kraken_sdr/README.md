@@ -110,11 +110,17 @@ Stop; Stop clears each dongle's own GPIO 0 as part of the guarded teardown).
   plugin logs an ERROR with the **per-channel** drop counts, so one sick dongle is named
   rather than hidden in a total; the calibrator's next recalibration measures the
   shifted delays and re-aligns.
-- **A dead channel is revived, not waited on.** The lockstep gate blocks until every
-  channel has a full batch, so one wedged dongle silences the whole array. A channel
-  that delivers nothing for 5 s while a sibling's ring sits full is revived in place,
-  escalating with a 30 s backoff between attempts — no physical access needed, which
-  matters for a remotely operated mast:
+- **A dead channel degrades the array; it does not silence it.** A channel that
+  delivers nothing for 5 s while others flow is taken out of the lockstep gate and its
+  port emits **zeros**: the healthy channels keep streaming, so 2-channel passive-radar
+  detection survives any single surveillance-channel loss (a zero channel adds nothing
+  to a fused detection surface and fails the bearing-quality gate — reduced sensitivity
+  and bearings, not an outage; losing **ch0, the reference**, still blinds detection
+  until it recovers). The continuous draining also keeps the channel's eventual rejoin
+  offset within the calibrator's delay search. On rejoin the log says alignment is
+  broken until the next recalibration.
+- **And it is revived in the background**, escalating with a 30 s backoff between
+  attempts — no physical access needed, which matters for a remotely operated mast:
   1. **stream restart** — cancel and restart its async read (clears wedged transfers);
   2. **device reopen** — close and reopen the dongle (re-detected by serial, full
      RTL2832U/tuner re-init and reconfiguration; ch0 also gets its noise-source and
