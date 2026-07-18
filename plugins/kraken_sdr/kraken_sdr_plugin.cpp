@@ -10,6 +10,7 @@
 #include <cstring>
 #include <memory>
 #include <thread>
+#include <vector>
 
 // KrakenSDR (KrakenRF) — a 5-channel coherent RTL-SDR array (5x R820T2 +
 // RTL2832U sharing one 28.8 MHz TCXO). This is a direct capture driver: it
@@ -115,10 +116,35 @@ struct KrakenSdrState {
     uint64_t block_index = 0;
     bool streaming = false;
 
-    // overflow reporting (each channel dropping a different amount breaks the
-    // fixed inter-channel alignment)
-    uint64_t dropped_reported = 0;
+    // Overflow reporting (each channel dropping a different amount breaks the
+    // fixed inter-channel alignment). Counted per channel against a baseline:
+    // a restarted stream resets its device counter, which an aggregate sum
+    // would read as a huge bogus delta.
+    uint64_t drop_seen[NUM_CH] = {};
+    uint64_t drop_pending[NUM_CH] = {};
     std::chrono::steady_clock::time_point last_drop_log{};
+
+    // Sick-channel watchdog. One failing dongle paces the lockstep gate for
+    // the whole array — and this rig may be operated remotely, where
+    // "reseat the cable" is not an option. Health is a delivery RATE over a
+    // window, not ring activity: a dying dongle usually trickles rather than
+    // stops, and a trickle changes the ring every tick while starving the
+    // array. Refused (dropped) samples count as delivered, so downstream
+    // backpressure does not read as a sick channel.
+    uint32_t last_avail[NUM_CH] = {};
+    uint64_t inflow_accum[NUM_CH] = {};
+    bool read_last[NUM_CH] = {};
+    bool stalled_ch[NUM_CH] = {};
+    std::chrono::steady_clock::time_point health_window_start{};
+    std::chrono::steady_clock::time_point last_restart[NUM_CH];
+    std::chrono::steady_clock::time_point all_dead_log{};
+    // escalation ladder per channel: 0 = try a stream restart next, 1 = the
+    // restart did not hold, try a full device reopen next
+    int revive_level[NUM_CH] = {};
+    // a dead channel is taken out of the lockstep gate and its port emits
+    // zeros, so the healthy channels keep the array running while it revives
+    bool zero_fill[NUM_CH] = {};
+    std::vector<int16_t> flush_buf;   // discard buffer for a rejoin's stale backlog
 };
 
 SPC_PLUGIN_CAST(KrakenSdrState)
@@ -151,7 +177,7 @@ static const SpcPluginDescriptor* get_descriptor()
 {
     if (!g_desc_initialized) {
         spc::DescriptorBuilder("kraken_sdr", "KrakenSDR", "Signal/SDR/Passive Radar/Sources")
-            .author("Speculor").version("0.1.0")
+            .author("Speculor").version("0.1.1")
             .data_source()
             .description("Streams five coherent I/Q channels from a KrakenSDR "
                          "(5x R820T2 coherent RTL-SDR array). Frequency-coherent "
@@ -281,13 +307,29 @@ static int snap_gain_tenths(float gain_db)
     return target;
 }
 
+// Run a per-tuner operation on all five tuners concurrently and join. Each
+// dongle is its own USB device (own handle, own endpoints), so the control
+// transfers don't contend — serially the five rounds add up to >100 ms, which
+// around a calibration burst is long enough to stall draining and overflow
+// the rings of every coherent consumer downstream.
+template <typename F>
+static void for_each_tuner_parallel(KrakenSdrState* s, F&& fn)
+{
+    std::thread threads[NUM_CH];
+    for (int k = 0; k < NUM_CH; ++k)
+        if (s->devices[k]) threads[k] = std::thread(fn, k, s->devices[k].get());
+    for (auto& t : threads)
+        if (t.joinable()) t.join();
+}
+
 // Apply the universal manual gain to every open tuner (the Kraken uses one
 // "universal gain" across all five).
 static void apply_gain_all(KrakenSdrState* s)
 {
     const int target = snap_gain_tenths(s->gain_db);
-    for (int k = 0; k < NUM_CH; ++k)
-        if (s->devices[k]) s->devices[k]->set_tuner_gain(target);
+    for_each_tuner_parallel(s, [target](int, spc::rtlsdr::RtlSdrDevice* d) {
+        d->set_tuner_gain(target);
+    });
 }
 
 // heimdall's per-band calibration gain (hw_controller.py cal_gain_table,
@@ -316,17 +358,20 @@ static void enter_cal_gain(KrakenSdrState* s)
     const float db = (s->cal_gain_db >= 0.0f) ? s->cal_gain_db
                                               : auto_cal_gain_db(s->center_freq);
     const int target = snap_gain_tenths(db);
+    const bool agc = s->agc_enabled != 0;
+    bool ok[NUM_CH] = {true, true, true, true, true};
+    for_each_tuner_parallel(s, [&](int k, spc::rtlsdr::RtlSdrDevice* d) {
+        if (agc) d->set_agc(false);   // amplitude cal needs fixed gain
+        d->set_tuner_gain_mode(true);
+        ok[k] = d->set_tuner_gain(target);
+    });
     bool all_ok = true;
     for (int k = 0; k < NUM_CH; ++k) {
-        if (!s->devices[k]) continue;
-        if (s->agc_enabled) s->devices[k]->set_agc(false);   // amplitude cal needs fixed gain
-        s->devices[k]->set_tuner_gain_mode(true);
-        if (!s->devices[k]->set_tuner_gain(target)) {
-            all_ok = false;
-            SPC_LOG_ERROR(&s->host.cached_log,
-                          "KrakenSDR: ch%d refused calibration gain %.1f dB — its burst may clip", k,
-                          static_cast<double>(target) / 10.0);
-        }
+        if (ok[k]) continue;
+        all_ok = false;
+        SPC_LOG_ERROR(&s->host.cached_log,
+                      "KrakenSDR: ch%d refused calibration gain %.1f dB — its burst may clip", k,
+                      static_cast<double>(target) / 10.0);
     }
     if (all_ok)
         SPC_LOG_INFO(&s->host.cached_log,
@@ -337,14 +382,14 @@ static void enter_cal_gain(KrakenSdrState* s)
 
 static void leave_cal_gain(KrakenSdrState* s)
 {
-    for (int k = 0; k < NUM_CH; ++k) {
-        if (!s->devices[k]) continue;
-        if (s->agc_enabled) {
-            s->devices[k]->set_agc(true);
-            s->devices[k]->set_tuner_gain_mode(false);
-        }
+    if (s->agc_enabled) {
+        for_each_tuner_parallel(s, [](int, spc::rtlsdr::RtlSdrDevice* d) {
+            d->set_agc(true);
+            d->set_tuner_gain_mode(false);
+        });
+    } else {
+        apply_gain_all(s);
     }
-    if (!s->agc_enabled) apply_gain_all(s);
     SPC_LOG_INFO(&s->host.cached_log, "KrakenSDR: operating gain restored (%s)",
                  s->agc_enabled ? "AGC" : "manual");
 }
@@ -424,8 +469,11 @@ static int set_parameter(SpcPluginInstance* inst, const char* name,
             if (s->devices[k]) s->devices[k]->set_freq_correction(s->freq_correction);
         return 0;
     }
+    const int32_t noise_prev = s->noise_source;
     if (spc::try_set_bool(name, value, "noise_source", s->noise_source)) {
-        if (ctrl) {
+        // The calibrator re-sends OFF freely (on every recalibration restart);
+        // only a real transition may pay the five-tuner gain round.
+        if (ctrl && s->noise_source != noise_prev) {
             // low gain before the switch flips, operating gain only after it
             // flips back — the burst must never meet the operating gain
             if (s->noise_source) enter_cal_gain(s);
@@ -497,8 +545,21 @@ static int start(SpcPluginInstance* inst)
 {
     auto* s = state(inst);
     s->block_index = 0;
-    s->dropped_reported = 0;
     s->last_drop_log = {};
+    s->all_dead_log = {};
+    const auto now_t = std::chrono::steady_clock::now();
+    s->health_window_start = now_t;
+    for (int k = 0; k < NUM_CH; ++k) {
+        s->drop_seen[k] = 0;
+        s->drop_pending[k] = 0;
+        s->last_avail[k] = 0;
+        s->inflow_accum[k] = 0;
+        s->read_last[k] = false;
+        s->stalled_ch[k] = false;
+        s->last_restart[k] = {};
+        s->revive_level[k] = 0;
+        s->zero_fill[k] = false;
+    }
 
     if (!spc::rtlsdr::RtlSdrDevice::load_api()) {
         SPC_LOG_ERROR(&s->host.cached_log, "KrakenSDR: rtlsdr library not available");
@@ -615,6 +676,11 @@ static int start(SpcPluginInstance* inst)
         }
     }
 
+    // The health window must start where the data starts: start() spends
+    // seconds opening and tuning five dongles, and counting that dead time
+    // against the first window's inflow reads a healthy array as all-stalled.
+    s->health_window_start = std::chrono::steady_clock::now();
+
     s->streaming = true;
     SPC_LOG_INFO(&s->host.cached_log,
                  "KrakenSDR started (%d ch, freq=%d Hz, rate=%u Hz, noise_src=%d)",
@@ -630,6 +696,50 @@ static int stop(SpcPluginInstance* inst)
     SPC_LOG_INFO(&s->host.cached_log, "KrakenSDR stopped (%llu blocks)",
                  static_cast<unsigned long long>(s->block_index));
     return 0;
+}
+
+// Full per-channel recovery: close and reopen the dongle. rtlsdr_open
+// re-initialises the RTL2832U baseband and the tuner re-locks on re-tune, so
+// this clears everything short of an actual power loss — the closest thing to
+// a per-channel power-cycle the hardware allows (the five dongles share one
+// rail behind the internal hub; there is no per-port power switching).
+// Re-detects by serial rather than trusting the old index: a device that fell
+// off the bus and back may have re-enumerated elsewhere.
+static bool reopen_channel(KrakenSdrState* s, int k)
+{
+    s->devices[k].reset();   // cancels + joins the read thread, releases the handle
+
+    uint32_t idx[NUM_CH];
+    if (!detect_kraken(s->relax_serial_match != 0, idx, &s->host.cached_log)) return false;
+
+    auto dev = std::make_unique<spc::rtlsdr::RtlSdrDevice>(&s->host.cached_log);
+    if (!dev->open(idx[k])) return false;
+
+    // same bring-up order as start(): rate, dithering before the tune, tune,
+    // bandwidth, ppm, manual-gain seed (then AGC if enabled)
+    dev->set_sample_rate(static_cast<uint32_t>(s->sample_rate));
+    dev->set_dithering(s->dithering != 0);
+    dev->set_center_freq(static_cast<uint32_t>(s->center_freq));
+    dev->set_bandwidth(static_cast<uint32_t>(s->bandwidth));
+    dev->set_freq_correction(s->freq_correction);
+    dev->set_agc(false);
+    dev->set_tuner_gain_mode(true);
+    dev->set_tuner_gain(snap_gain_tenths(s->gain_db));
+    if (s->agc_enabled) {
+        dev->set_tuner_gain_mode(false);
+        dev->set_agc(true);
+    }
+    s->devices[k] = std::move(dev);
+
+    // channel 0 owns the noise-source and bias-tee GPIO — restore its state
+    if (k == 0) {
+        s->devices[0]->set_bias_tee_gpio(0, s->noise_source != 0);
+        for (int j = 0; j < NUM_CH; ++j)
+            s->devices[0]->set_bias_tee_gpio(j + 1, s->bias_tee[j] != 0);
+    }
+
+    s->drop_seen[k] = 0;
+    return s->devices[k]->start_streaming();
 }
 
 // ── process ─────────────────────────────────────────────────────────
@@ -650,33 +760,173 @@ static int process(SpcPluginInstance* inst, const SpcData*, uint32_t,
         return 0;
     }
 
+    const auto now_t = std::chrono::steady_clock::now();
+
     // A full ring drops samples, and each channel drops a different amount —
     // which silently breaks the fixed inter-channel alignment everything
-    // coherent downstream depends on. Say so; the calibrator's next
-    // recalibration re-measures and re-aligns.
-    uint64_t dropped = 0;
-    for (int k = 0; k < NUM_CH; ++k)
-        if (s->devices[k]) dropped += s->devices[k]->dropped_samples();
-    if (dropped != s->dropped_reported) {
-        const auto now_t = std::chrono::steady_clock::now();
-        if (now_t - s->last_drop_log > std::chrono::seconds(5)) {
-            s->last_drop_log = now_t;
-            SPC_LOG_ERROR(&s->host.cached_log,
-                          "KrakenSDR: ring overflow — %llu samples dropped (consumer stalled). "
-                          "Channel alignment is broken until the calibrator recalibrates",
-                          static_cast<unsigned long long>(dropped - s->dropped_reported));
+    // coherent downstream depends on. Say so, per channel, so a single sick
+    // dongle is named rather than hidden in an aggregate; the calibrator's
+    // next recalibration re-measures and re-aligns.
+    bool any_drop = false;
+    uint64_t tick_drop[NUM_CH] = {};
+    for (int k = 0; k < NUM_CH; ++k) {
+        if (!s->devices[k]) continue;
+        const uint64_t cur = s->devices[k]->dropped_samples();
+        if (cur < s->drop_seen[k]) s->drop_seen[k] = 0;   // stream was restarted
+        if (cur > s->drop_seen[k]) {
+            tick_drop[k] = cur - s->drop_seen[k];
+            s->drop_pending[k] += tick_drop[k];
+            s->drop_seen[k] = cur;
         }
-        s->dropped_reported = dropped;
+        if (s->drop_pending[k] != 0) any_drop = true;
+    }
+    if (any_drop && now_t - s->last_drop_log > std::chrono::seconds(5)) {
+        s->last_drop_log = now_t;
+        SPC_LOG_ERROR(&s->host.cached_log,
+                      "KrakenSDR: ring overflow — dropped ch0 %llu, ch1 %llu, ch2 %llu, ch3 %llu, "
+                      "ch4 %llu samples since the last report (consumer stalled, or a dead channel "
+                      "blocking the lockstep gate). Channel alignment is broken until the "
+                      "calibrator recalibrates",
+                      static_cast<unsigned long long>(s->drop_pending[0]),
+                      static_cast<unsigned long long>(s->drop_pending[1]),
+                      static_cast<unsigned long long>(s->drop_pending[2]),
+                      static_cast<unsigned long long>(s->drop_pending[3]),
+                      static_cast<unsigned long long>(s->drop_pending[4]));
+        for (int k = 0; k < NUM_CH; ++k) s->drop_pending[k] = 0;
     }
 
-    // Lockstep gate: only emit when every channel has a full batch buffered, so
-    // each block is equal-size and time-corresponding across all five ports.
-    // The shared clock keeps the equal-rate rings aligned modulo the fixed
-    // startup offset, so this never starves in steady state.
-    uint32_t ready = BATCH_SIZE;
+    // Per-channel delivery accounting: what the dongle produced this tick is
+    // the ring-level change, plus what last tick's batch read consumed, plus
+    // what the full ring refused.
+    uint32_t avail[NUM_CH];
+    for (int k = 0; k < NUM_CH; ++k) {
+        avail[k] = s->devices[k] ? s->devices[k]->available() : 0u;
+        const int64_t delta = static_cast<int64_t>(avail[k]) -
+                              static_cast<int64_t>(s->last_avail[k]) +
+                              (s->read_last[k] ? static_cast<int64_t>(BATCH_SIZE) : 0);
+        if (delta > 0) s->inflow_accum[k] += static_cast<uint64_t>(delta);
+        s->inflow_accum[k] += tick_drop[k];
+        s->last_avail[k] = avail[k];
+        s->read_last[k] = false;
+    }
+
+    // Health verdicts once per window: healthy means at least half the nominal
+    // rate actually delivered. A dying dongle usually trickles rather than
+    // stops, and a trickle would pace the lockstep gate — and the whole
+    // array — at its crawl.
+    const auto window = now_t - s->health_window_start;
+    if (window >= std::chrono::seconds(5)) {
+        const double secs = std::chrono::duration<double>(window).count();
+        const auto needed = static_cast<uint64_t>(s->actual_sample_rate * secs * 0.5);
+        for (int k = 0; k < NUM_CH; ++k) {
+            s->stalled_ch[k] = s->devices[k] && s->inflow_accum[k] < needed;
+            s->inflow_accum[k] = 0;
+        }
+        s->health_window_start = now_t;
+    }
+    int stalled_count = 0;
     for (int k = 0; k < NUM_CH; ++k)
-        ready = std::min(ready, s->devices[k] ? s->devices[k]->available() : 0u);
-    if (ready < BATCH_SIZE) {
+        if (s->stalled_ch[k]) ++stalled_count;
+
+    // Degrade before failing: a dead channel leaves the lockstep gate and its
+    // port emits zeros, so the healthy channels keep the array detecting (a
+    // zero channel adds nothing to a fused surface and fails the bearing
+    // quality gate — reduced sensitivity, not an outage). The continuous
+    // draining this buys also keeps the eventual rejoin offset within the
+    // calibrator's delay search, where a blocked array's ~1 s backlog is not.
+    for (int k = 0; k < NUM_CH; ++k) {
+        if (!s->devices[k]) continue;
+        if (!s->zero_fill[k] && s->stalled_ch[k] && stalled_count < NUM_CH) {
+            s->zero_fill[k] = true;
+            SPC_LOG_ERROR(&s->host.cached_log,
+                          "KrakenSDR: ch%d is delivering below half rate — zero-filling its port "
+                          "so the array keeps running (%s). Revive attempts continue in the "
+                          "background",
+                          k,
+                          k == 0 ? "ch0 is the REFERENCE, so detection is blind until it recovers"
+                                 : "detection continues at reduced sensitivity; bearings degrade "
+                                   "until it recovers");
+        } else if (s->zero_fill[k] && !s->stalled_ch[k] && avail[k] >= BATCH_SIZE) {
+            // rejoin only once the delivery RATE is back — a trickle fills an
+            // undrained ring too. The dead period's backlog is stale and
+            // discontinuous, so keep just the freshest batch.
+            if (avail[k] > BATCH_SIZE) {
+                const uint32_t excess = avail[k] - BATCH_SIZE;
+                s->flush_buf.resize(static_cast<size_t>(BATCH_SIZE) * 2);
+                uint32_t left = excess;
+                while (left > 0) {
+                    const uint32_t n = std::min(left, BATCH_SIZE);
+                    s->devices[k]->read_iq(s->flush_buf.data(), n);
+                    left -= n;
+                }
+            }
+            s->zero_fill[k] = false;
+            s->revive_level[k] = 0;
+            SPC_LOG_WARN(&s->host.cached_log,
+                         "KrakenSDR: ch%d rejoined the array — channel alignment is broken until "
+                         "the calibrator recalibrates", k);
+        }
+    }
+
+    // Revive ladder for stalled channels — independent of the gate, so it
+    // keeps working while their ports are zero-filled.
+    if (stalled_count == NUM_CH) {
+        if (now_t - s->all_dead_log > std::chrono::seconds(30)) {
+            s->all_dead_log = now_t;
+            SPC_LOG_ERROR(&s->host.cached_log,
+                          "KrakenSDR: no channel is delivering samples — a device, hub or "
+                          "power failure below the per-channel level. Restart the pipeline; "
+                          "if that does not recover it, the unit needs a power-cycle");
+        }
+    } else {
+        for (int k = 0; k < NUM_CH; ++k) {
+            if (!s->devices[k] || !s->stalled_ch[k]) continue;
+            if (now_t - s->last_restart[k] < std::chrono::seconds(30)) continue;
+            s->last_restart[k] = now_t;
+            if (s->revive_level[k] == 0) {
+                s->revive_level[k] = 1;
+                SPC_LOG_ERROR(&s->host.cached_log,
+                              "KrakenSDR: ch%d is delivering below half rate while other channels "
+                              "flow — restarting its stream. Channel alignment is broken until "
+                              "the calibrator recalibrates",
+                              k);
+                s->devices[k]->stop_streaming();
+                if (!s->devices[k]->start_streaming())
+                    SPC_LOG_ERROR(&s->host.cached_log,
+                                  "KrakenSDR: ch%d stream restart failed — escalating to a device "
+                                  "reopen at the next attempt", k);
+                s->drop_seen[k] = 0;
+            } else {
+                SPC_LOG_ERROR(&s->host.cached_log,
+                              "KrakenSDR: ch%d did not recover from a stream restart — reopening "
+                              "the device (full tuner re-init, the closest software gets to a "
+                              "per-channel power-cycle)",
+                              k);
+                if (!reopen_channel(s, k))
+                    SPC_LOG_ERROR(&s->host.cached_log,
+                                  "KrakenSDR: ch%d reopen failed — the dongle is off the bus. "
+                                  "Remote options: disable/enable it in Device Manager (pnputil, "
+                                  "instance USB\\VID_0BDA&PID_2838\\%d), else power-cycle the unit",
+                                  k, KRAKEN_SERIAL_BASE + k);
+            }
+            // grace for the new stream: clear the verdict and let the next
+            // full window re-measure it
+            s->stalled_ch[k] = false;
+            s->inflow_accum[k] = 0;
+        }
+    }
+
+    // Lockstep gate over the healthy channels: emit only when every one of
+    // them has a full batch buffered, so blocks stay equal-size and
+    // time-corresponding across all five ports.
+    uint32_t ready = BATCH_SIZE;
+    int healthy = 0;
+    for (int k = 0; k < NUM_CH; ++k) {
+        if (s->zero_fill[k]) continue;
+        ready = std::min(ready, avail[k]);
+        ++healthy;
+    }
+    if (healthy == 0 || ready < BATCH_SIZE) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
         return 0;
     }
@@ -685,7 +935,13 @@ static int process(SpcPluginInstance* inst, const SpcData*, uint32_t,
 
     for (int k = 0; k < NUM_CH; ++k) {
         if (spc_table_resize(&s->tables[k], BATCH_SIZE) != 0) return -1;
-        s->devices[k]->read_iq(reinterpret_cast<int16_t*>(s->tables[k].data), BATCH_SIZE);
+        if (s->zero_fill[k]) {
+            std::memset(s->tables[k].data, 0,
+                        static_cast<size_t>(BATCH_SIZE) * sizeof(int16_t) * 2);
+        } else {
+            s->devices[k]->read_iq(reinterpret_cast<int16_t*>(s->tables[k].data), BATCH_SIZE);
+            s->read_last[k] = true;
+        }
 
         // shared metadata + shared frame_number/timestamp so a downstream
         // correlator can pair reference/surveillance samples of the same block

@@ -107,8 +107,44 @@ Stop; Stop clears each dongle's own GPIO 0 as part of the guarded teardown).
 - **Overflow is loud, because it must be.** If the pipeline stalls long enough for a
   channel's ring to fill (~0.9 s at 2.4 MSPS), samples drop — and each channel drops a
   *different* amount, which silently breaks the fixed inter-channel alignment. The
-  plugin counts refused samples per channel and logs an ERROR when it happens; the
-  calibrator's next recalibration measures the shifted delays and re-aligns.
+  plugin logs an ERROR with the **per-channel** drop counts, so one sick dongle is named
+  rather than hidden in a total; the calibrator's next recalibration measures the
+  shifted delays and re-aligns.
+- **A sick channel degrades the array; it does not silence it.** Channel health is a
+  delivery *rate*: below half the nominal sample rate over a 5 s window (with
+  ring-refused samples counted as delivered, so downstream backpressure is not
+  misread), the channel is taken out of the lockstep gate and its port emits
+  **zeros** — a rate test because a dying dongle usually *trickles* rather than stops,
+  and a trickle would otherwise pace the whole array at its crawl. The healthy
+  channels keep streaming, so 2-channel passive-radar detection survives any single
+  surveillance-channel loss (a zero channel adds nothing to a fused detection surface
+  and fails the bearing-quality gate — reduced sensitivity and bearings, not an
+  outage; losing **ch0, the reference**, still blinds detection until it recovers).
+  A channel rejoins only when its rate is back, with the dead period's stale backlog
+  flushed so the alignment offset stays within the calibrator's delay search; the log
+  says alignment is broken until the next recalibration.
+- **And it is revived in the background**, escalating with a 30 s backoff between
+  attempts — no physical access needed, which matters for a remotely operated mast:
+  1. **stream restart** — cancel and restart its async read (clears wedged transfers);
+  2. **device reopen** — close and reopen the dongle (re-detected by serial, full
+     RTL2832U/tuner re-init and reconfiguration; ch0 also gets its noise-source and
+     bias-tee GPIO state restored). This is the closest software gets to a per-channel
+     power-cycle: the five dongles share one rail behind the internal hub, with no
+     per-port power switching for a host to command.
+  3. If the reopen fails the dongle is off the bus; the log names the remaining remote
+     option — a driver-level disable/enable (`pnputil`, instance
+     `USB\VID_0BDA&PID_2838\<serial>`) — before a physical power-cycle.
+
+  A revived stream begins at a new startup skew, which the calibrator's next pass
+  re-measures. If *no* channel is delivering, that is a device/hub/power-level failure
+  and the log says so instead of restart-thrashing all five.
+- **Calibration gain flips don't stall the stream.** Entering/leaving the calibration
+  gain around a noise burst touches all five tuners *concurrently* (one USB round, not
+  five serial ones), and a re-sent `noise_source` command that doesn't change state is
+  a no-op — a calibrator can re-send OFF liberally without paying a gain round each
+  time. This matters because a gain round suspends draining: made serial, each burst
+  stalls the stream long enough to overflow downstream rings, so every calibration
+  would cause the misalignment the next one exists to fix.
 - **Read-back verification.** After configuring, each tuner is asked what it actually
   did (`rtlsdr_get_center_freq`/`_get_sample_rate`) — a channel that silently refused
   its frequency is otherwise indistinguishable from one with a dead antenna. Note the
