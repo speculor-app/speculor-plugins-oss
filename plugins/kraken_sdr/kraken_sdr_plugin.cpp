@@ -145,6 +145,16 @@ struct KrakenSdrState {
     // zeros, so the healthy channels keep the array running while it revives
     bool zero_fill[NUM_CH] = {};
     std::vector<int16_t> flush_buf;   // discard buffer for a rejoin's stale backlog
+
+    // Operating-stream ADC rail monitor (strided scan of every emitted block).
+    // Rails during normal capture mean the direct signal is overdriving the
+    // front end — the intermod floor that buries echoes — which the cal-burst
+    // clip check can never see. Cal-gain windows are excluded (the burst is
+    // deliberately hot).
+    bool cal_gain_active = false;
+    uint64_t rail_hits[NUM_CH] = {};
+    uint64_t rail_seen[NUM_CH] = {};
+    std::chrono::steady_clock::time_point rail_window_start{};
 };
 
 SPC_PLUGIN_CAST(KrakenSdrState)
@@ -355,6 +365,7 @@ static float auto_cal_gain_db(int32_t freq_hz)
 // drops every tuner to a calibration gain for the duration and restores after.
 static void enter_cal_gain(KrakenSdrState* s)
 {
+    s->cal_gain_active = true;
     const float db = (s->cal_gain_db >= 0.0f) ? s->cal_gain_db
                                               : auto_cal_gain_db(s->center_freq);
     const int target = snap_gain_tenths(db);
@@ -382,6 +393,7 @@ static void enter_cal_gain(KrakenSdrState* s)
 
 static void leave_cal_gain(KrakenSdrState* s)
 {
+    s->cal_gain_active = false;
     if (s->agc_enabled) {
         for_each_tuner_parallel(s, [](int, spc::rtlsdr::RtlSdrDevice* d) {
             d->set_agc(true);
@@ -941,6 +953,21 @@ static int process(SpcPluginInstance* inst, const SpcData*, uint32_t,
         } else {
             s->devices[k]->read_iq(reinterpret_cast<int16_t*>(s->tables[k].data), BATCH_SIZE);
             s->read_last[k] = true;
+
+            // strided rail scan: every 16th sample (I and Q), ~4k checks per
+            // 65536-sample block — statistically ample, cost negligible.
+            // 8-bit rails after the (x-128)*256 conversion are -32768 / 32512.
+            if (!s->cal_gain_active) {
+                const auto* iq = reinterpret_cast<const int16_t*>(s->tables[k].data);
+                uint32_t hits = 0;
+                for (uint32_t i = 0; i < BATCH_SIZE; i += 16) {
+                    const int16_t vi = iq[i * 2], vq = iq[i * 2 + 1];
+                    if (vi == -32768 || vi == 32512 || vq == -32768 || vq == 32512)
+                        ++hits;
+                }
+                s->rail_hits[k] += hits;
+                s->rail_seen[k] += BATCH_SIZE / 16;
+            }
         }
 
         // shared metadata + shared frame_number/timestamp so a downstream
@@ -961,6 +988,43 @@ static int process(SpcPluginInstance* inst, const SpcData*, uint32_t,
     }
 
     ++s->block_index;
+
+    // 60 s rail report: the number that decides whether the operating gain is
+    // right. A clean array reads 0.00% everywhere; anything ≥ ~1% means the
+    // direct signal is spending the CPI in the rails and the map floor is
+    // intermod, not thermal noise.
+    {
+        const auto nowt = std::chrono::steady_clock::now();
+        if (s->rail_window_start.time_since_epoch().count() == 0) {
+            s->rail_window_start = nowt;
+        } else if (nowt - s->rail_window_start >= std::chrono::seconds(60)) {
+            float pct[NUM_CH] = {};
+            float worst = 0.0f;
+            int worst_ch = 0;
+            for (int k = 0; k < NUM_CH; ++k) {
+                pct[k] = s->rail_seen[k]
+                             ? 100.0f * static_cast<float>(s->rail_hits[k]) /
+                                   static_cast<float>(s->rail_seen[k])
+                             : 0.0f;
+                if (pct[k] > worst) { worst = pct[k]; worst_ch = k; }
+                s->rail_hits[k] = 0;
+                s->rail_seen[k] = 0;
+            }
+            SPC_LOG_INFO(&s->host.cached_log,
+                         "KrakenSDR: ADC rails at %.1f dB gain (60 s): ch0 %.2f%%  ch1 %.2f%%  "
+                         "ch2 %.2f%%  ch3 %.2f%%  ch4 %.2f%%",
+                         static_cast<double>(s->gain_db), static_cast<double>(pct[0]),
+                         static_cast<double>(pct[1]), static_cast<double>(pct[2]),
+                         static_cast<double>(pct[3]), static_cast<double>(pct[4]));
+            if (worst >= 1.0f)
+                SPC_LOG_WARN(&s->host.cached_log,
+                             "KrakenSDR: ch%d spends %.1f%% of samples at the ADC rails — the "
+                             "direct signal is overdriving the front end and the map floor is "
+                             "intermod; lower the operating gain until rails stay under ~0.1%%",
+                             worst_ch, static_cast<double>(worst));
+            s->rail_window_start = nowt;
+        }
+    }
     return 0;
 }
 
