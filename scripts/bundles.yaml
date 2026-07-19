@@ -4,6 +4,12 @@ defaults:
   formats: [zip]
   archive_prefix: speculor-bundle
 
+# Release allowlist (mirrors speculor-plugins/scripts/bundles.yaml). A release
+# build compiles only the plugins listed here; hold one back from releases with
+# `dev_plugins: [<target-name>]` or a bundle `status: dev`. See that repo's
+# manifest header for the full contract.
+dev_plugins: []
+
 # The open-source plugins ship as a single "oss" bundle. This mirrors the structure
 # of speculor-plugins/scripts/bundles.yaml and is consumed by that repo's
 # build_bundles.py (pointed here via --manifest, which derives the repo root from

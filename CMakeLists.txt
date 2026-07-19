@@ -22,6 +22,9 @@ set_property(CACHE SPECULOR_ARCH_BASELINE PROPERTY STRINGS v3 v2 v1)
 # by default because PDBs roughly double package size; the app sets this per
 # build via the build script.
 option(SPECULOR_WITH_PDB "Emit PDBs in Release for crash symbolication" OFF)
+# Release-only gate — mirrors speculor-plugins. When ON, only plugins the manifest
+# ships are compiled; held-back dirs are skipped. OFF for local dev builds.
+option(SPECULOR_RELEASE_PLUGINS "Build only release-shipped plugins (skip in-dev)" OFF)
 
 if(MSVC)
     string(APPEND CMAKE_CXX_FLAGS_RELEASE " /Oi /Ot /fp:fast")
@@ -89,17 +92,61 @@ endif()
 # The shared CoreBgs base + OpenCV come from spclib; see common/bgs and each plugin.
 set(SPC_OSS_COMMON_DIR ${CMAKE_SOURCE_DIR}/common)
 
-# Most open-source plugins ship together in a single "oss" bundle (their own domain
-# in the as-shipped plugins/ layout). spc_add_plugin reads SPC_PLUGIN_BUNDLE_<name>
-# to route each plugin DLL into <SPC_PLUGIN_OUTPUT_DIR>/<bundle>/. Keep this in sync
-# with scripts/bundles.yaml. kraken_sdr routes into the passive-radar bundle instead:
-# it is the source stage of the coherent passive-radar chain whose other members
-# (coherent_calibrator, range_doppler, pr_map) live in speculor-plugins, so the
-# deployed bundle dir holds the whole chain.
-foreach(_oss_plugin vibe_bgs subsense_bgs rtl_sdr)
-    set(SPC_PLUGIN_BUNDLE_${_oss_plugin} "oss")
-endforeach()
-set(SPC_PLUGIN_BUNDLE_kraken_sdr "passive-radar")
+# Plugin → bundle map + in-development gate. spc_add_plugin reads
+# SPC_PLUGIN_BUNDLE_<name> to route each plugin DLL into
+# <SPC_PLUGIN_OUTPUT_DIR>/<bundle>/. Single source of truth is scripts/bundles.yaml,
+# shared with speculor-plugins' build_bundles.py: in the full/release build the
+# build script passes -DSPC_PLUGINS_REPO=<speculor-plugins>, so we generate the map
+# (and the release gate, and the completeness check) from the manifest. Standalone
+# OSS builds (no sibling script) fall back to the static map below and build all.
+# Most plugins share the single "oss" bundle; kraken_sdr routes into passive-radar
+# — it is the source stage of the coherent chain whose other members
+# (coherent_calibrator, range_doppler, pr_map) live in speculor-plugins.
+set(_oss_bundles_py "")
+if(DEFINED SPC_PLUGINS_REPO AND EXISTS "${SPC_PLUGINS_REPO}/scripts/build_bundles.py")
+    set(_oss_bundles_py "${SPC_PLUGINS_REPO}/scripts/build_bundles.py")
+endif()
+if(_oss_bundles_py)
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    set(_oss_bundles_cmake "${CMAKE_BINARY_DIR}/bundles.cmake")
+    execute_process(
+        COMMAND "${Python3_EXECUTABLE}" "${_oss_bundles_py}"
+                --manifest "${CMAKE_SOURCE_DIR}/scripts/bundles.yaml"
+                --emit-cmake-bundles "${_oss_bundles_cmake}"
+        RESULT_VARIABLE _oss_rc OUTPUT_VARIABLE _oss_out ERROR_VARIABLE _oss_err)
+    if(NOT _oss_rc EQUAL 0)
+        message(FATAL_ERROR "Failed to emit OSS plugin bundle map (rc=${_oss_rc}):\n${_oss_out}\n${_oss_err}")
+    endif()
+    include("${_oss_bundles_cmake}")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+        "${CMAKE_SOURCE_DIR}/scripts/bundles.yaml")
+else()
+    # standalone fallback: static map (keep in sync with scripts/bundles.yaml);
+    # no in-dev gate — standalone builds compile every plugin.
+    foreach(_oss_plugin vibe_bgs subsense_bgs rtl_sdr)
+        set(SPC_PLUGIN_BUNDLE_${_oss_plugin} "oss")
+    endforeach()
+    set(SPC_PLUGIN_BUNDLE_kraken_sdr "passive-radar")
+endif()
+
+# Gate add_subdirectory the same way speculor-plugins does (see that repo's
+# plugins/CMakeLists.txt): with SPECULOR_RELEASE_PLUGINS ON, a dir the emitted
+# fragment marks SPC_PLUGIN_DIR_<token> OFF is held back. No-op when the static
+# fallback ran (no SPC_PLUGIN_DIR_* defined) or the option is OFF.
+macro(add_subdirectory _spc_dir)
+    set(_spc_do_add TRUE)
+    if(SPECULOR_RELEASE_PLUGINS)
+        file(RELATIVE_PATH _spc_rel "${CMAKE_SOURCE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/${_spc_dir}")
+        string(MAKE_C_IDENTIFIER "${_spc_rel}" _spc_tok)
+        if(DEFINED SPC_PLUGIN_DIR_${_spc_tok} AND NOT SPC_PLUGIN_DIR_${_spc_tok})
+            set(_spc_do_add FALSE)
+            message(STATUS "Speculor release: holding back in-dev plugin dir ${_spc_rel}")
+        endif()
+    endif()
+    if(_spc_do_add)
+        _add_subdirectory(${ARGV})
+    endif()
+endmacro()
 
 add_subdirectory(plugins/vibe_bgs)
 add_subdirectory(plugins/subsense_bgs)
