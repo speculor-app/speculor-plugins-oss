@@ -710,6 +710,17 @@ static int stop(SpcPluginInstance* inst)
     return 0;
 }
 
+// Phase-1 abort (engine two-phase contract): interrupt all five tuners'
+// blocking reads via librtlsdr's callback-thread-safe cancel, so stop()'s
+// serial close_all() then joins promptly instead of cancelling each in turn.
+static int request_stop(SpcPluginInstance* inst)
+{
+    auto* s = state(inst);
+    for (int k = 0; k < NUM_CH; ++k)
+        if (s->devices[k]) s->devices[k]->request_stop_streaming();
+    return 0;
+}
+
 // Full per-channel recovery: close and reopen the dongle. rtlsdr_open
 // re-initialises the RTL2832U baseband and the tuner re-locks on re-tune, so
 // this clears everything short of an actual power loss — the closest thing to
@@ -1040,5 +1051,6 @@ SPC_PLUGIN_VTABLE(
     .start             = start,
     .stop              = stop,
     .set_host_services = set_host_services,
-    .scan_devices      = scan_devices
+    .scan_devices      = scan_devices,
+    .request_stop      = request_stop
 )
