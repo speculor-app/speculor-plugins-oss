@@ -194,6 +194,19 @@ void RtlSdrDevice::close()
 {
     if (!dev_) return;
     stop_streaming();
+    if (faulted_.load(std::memory_order_acquire)) {
+        // The dongle faulted mid-stream. Its librtlsdr/libusb transfer state is
+        // inconsistent; issuing more USB ops on it (bias-T GPIO write,
+        // rtlsdr_close) has been seen to wedge for seconds and to walk libusb's
+        // corrupted transfer list. Abandon the handle rather than poke a dead
+        // device — a faulted dongle needs a replug/restart to recover anyway,
+        // and the leaked handle is released when the process exits.
+        SPC_LOG_WARN(log_, "RTL-SDR device faulted — abandoning handle without "
+                           "further USB I/O (replug or restart to recover)");
+        dev_ = nullptr;
+        is_v4_ = false;
+        return;
+    }
     disable_bias_tee_safe();  // must not skip the Close() below on a fault
     api_.Close(dev_);
     SPC_LOG_INFO(log_, "RTL-SDR device closed");
@@ -352,10 +365,24 @@ void RtlSdrDevice::read_thread_fn()
     // rtlsdr_read_async blocks until rtlsdr_cancel_async is called
     // buf_num=0 and buf_len=0 use library defaults
     int ret = api_.ReadAsync(dev_, async_callback, this, 0, 0);
-    if (ret != 0 && streaming_.load(std::memory_order_relaxed)) {
-        SPC_LOG_ERROR(log_, "RTL-SDR async read exited with error %d", ret);
+    if (ret != 0) {
+        // Device I/O error / surprise removal: flag it so close() abandons the
+        // handle instead of issuing more USB I/O on the dead dongle.
+        faulted_.store(true, std::memory_order_release);
+        if (streaming_.load(std::memory_order_relaxed))
+            SPC_LOG_ERROR(log_, "RTL-SDR async read exited with error %d", ret);
     }
     streaming_.store(false, std::memory_order_release);
+}
+
+void RtlSdrDevice::request_stop_streaming()
+{
+    // Cross-thread cancel of the blocking rtlsdr_read_async (same practice as
+    // stop_streaming(), minus the join). The read thread then exits via
+    // librtlsdr's graceful RTLSDR_CANCELING path, which cancels and reaps the
+    // transfers before freeing them. Non-blocking: stop() does the join.
+    if (dev_ && api_.CancelAsync && streaming_.load(std::memory_order_acquire))
+        api_.CancelAsync(dev_);
 }
 
 bool RtlSdrDevice::start_streaming()
