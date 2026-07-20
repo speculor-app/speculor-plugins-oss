@@ -518,6 +518,16 @@ static int stop(SpcPluginInstance* inst)
     return 0;
 }
 
+// Phase-1 abort (engine two-phase contract): interrupt the blocking async read
+// so stop() is prompt and never waits a read timeout / gets detached. Runs
+// concurrently with process(); only kicks librtlsdr's cancel, frees nothing.
+static int request_stop(SpcPluginInstance* inst)
+{
+    auto* s = state(inst);
+    if (s->device) s->device->request_stop_streaming();
+    return 0;
+}
+
 // ── process ─────────────────────────────────────────────────────────
 
 static constexpr uint32_t BATCH_SIZE = 4096;
@@ -589,5 +599,6 @@ SPC_PLUGIN_VTABLE(
     .stop               = stop,
     .set_host_services  = set_host_services,
     .scan_devices       = scan_devices,
-    .validate_mandatory = validate_mandatory
+    .validate_mandatory = validate_mandatory,
+    .request_stop       = request_stop
 )

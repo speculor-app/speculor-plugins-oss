@@ -13,6 +13,13 @@
 # It is a superset of what the blog fork offers (86 exports vs 41), including the
 # bias_tee_gpio the KrakenSDR's noise source and bias tees are driven through.
 
+# librtlsdr v0.9.0 (through v2.1.0/master) has a use-after-free in
+# rtlsdr_read_async: on a hard USB error (LIBUSB_ERROR_IO glitch / surprise
+# removal) it frees still-in-flight transfers, corrupting the heap on the
+# WinUSB backend. Reported upstream (librtlsdr/librtlsdr issue #145, PR #146).
+# The rtl_sdr plugin mitigates it (request_stop for a clean bounded stop +
+# abandon-on-fault so close() stops poking a dead dongle), but the real fix is
+# in the DLL — bump this pin to the first upstream release that carries PR #146.
 set(_RTLSDR_VERSION "0.9.0")
 set(_RTLSDR_INSTALL "${CMAKE_BINARY_DIR}/_deps/rtl-sdr-sdk")
 set(_RTLSDR_CHECK "${_RTLSDR_INSTALL}/include/rtl-sdr.h")

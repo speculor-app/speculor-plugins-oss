@@ -137,6 +137,10 @@ public:
     // streaming
     bool start_streaming();
     void stop_streaming();
+    // Abort-phase interrupt (engine request_stop): cancel the blocking
+    // rtlsdr_read_async so a following stop() doesn't wait a read timeout.
+    // Safe to call concurrently with the read thread; non-blocking (no join).
+    void request_stop_streaming();
 
     // data access (consumer side of ring buffer)
     uint32_t read_iq(int16_t* buffer, uint32_t max_samples);
@@ -174,6 +178,13 @@ private:
     rtlsdr_dev_t* dev_ = nullptr;
     SpcRingBuffer* ring_ = nullptr;
     std::atomic<bool> streaming_{false};
+    // Set when rtlsdr_read_async returns an error (USB glitch / surprise
+    // removal). close() then abandons the handle instead of issuing more USB
+    // I/O on a dongle whose librtlsdr/libusb transfer state is inconsistent.
+    std::atomic<bool> faulted_{false};
+    // Set at read-thread exit, so stop_streaming() can tell the callback-thread
+    // self-cancel took effect before falling back to a cross-thread cancel.
+    std::atomic<bool> read_exited_{false};
     std::atomic<uint64_t> dropped_{0};
     std::thread read_thread_;
     bool is_v4_ = false;
