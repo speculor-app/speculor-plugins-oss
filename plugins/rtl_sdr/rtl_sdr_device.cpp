@@ -1,7 +1,9 @@
 #include "rtl_sdr_device.h"
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <thread>
 
 #ifdef _WIN32
 #include <io.h>
@@ -365,24 +367,29 @@ void RtlSdrDevice::read_thread_fn()
     // rtlsdr_read_async blocks until rtlsdr_cancel_async is called
     // buf_num=0 and buf_len=0 use library defaults
     int ret = api_.ReadAsync(dev_, async_callback, this, 0, 0);
-    if (ret != 0) {
-        // Device I/O error / surprise removal: flag it so close() abandons the
-        // handle instead of issuing more USB I/O on the dead dongle.
+    if (ret != 0 && streaming_.load(std::memory_order_relaxed)) {
+        // Error while we still wanted to stream = a real device fault (unplug /
+        // I/O error): close() abandons the handle rather than poke a dead
+        // dongle. A non-zero return AFTER we flipped streaming_ (our own stop,
+        // via the callback-thread cancel) is just librtlsdr's cancel-time
+        // NOT_FOUND — the transfers were reaped, the device is fine, and close()
+        // releases it normally so it can reopen next start.
         faulted_.store(true, std::memory_order_release);
-        if (streaming_.load(std::memory_order_relaxed))
-            SPC_LOG_ERROR(log_, "RTL-SDR async read exited with error %d", ret);
+        SPC_LOG_ERROR(log_, "RTL-SDR async read exited with error %d", ret);
     }
     streaming_.store(false, std::memory_order_release);
+    read_exited_.store(true, std::memory_order_release);
 }
 
 void RtlSdrDevice::request_stop_streaming()
 {
-    // Cross-thread cancel of the blocking rtlsdr_read_async (same practice as
-    // stop_streaming(), minus the join). The read thread then exits via
-    // librtlsdr's graceful RTLSDR_CANCELING path, which cancels and reaps the
-    // transfers before freeing them. Non-blocking: stop() does the join.
-    if (dev_ && api_.CancelAsync && streaming_.load(std::memory_order_acquire))
-        api_.CancelAsync(dev_);
+    // Abort-phase interrupt: flip streaming_ so the read thread's own
+    // async_callback cancels from inside libusb_handle_events — librtlsdr's
+    // documented-safe cancel. A cross-thread rtlsdr_cancel_async races
+    // librtlsdr's non-atomic async_status and has been seen to make
+    // handle_events return LIBUSB_ERROR_NOT_FOUND, tripping a librtlsdr
+    // use-after-free. stop_streaming() joins and has a bounded fallback.
+    streaming_.store(false, std::memory_order_release);
 }
 
 bool RtlSdrDevice::start_streaming()
@@ -396,6 +403,8 @@ bool RtlSdrDevice::start_streaming()
         return false;
     }
 
+    faulted_.store(false, std::memory_order_release);
+    read_exited_.store(false, std::memory_order_release);
     streaming_.store(true, std::memory_order_release);
     read_thread_ = std::thread(&RtlSdrDevice::read_thread_fn, this);
 
@@ -405,16 +414,22 @@ bool RtlSdrDevice::start_streaming()
 
 void RtlSdrDevice::stop_streaming()
 {
-    // cancel only if the async read is still running; if it already self-exited
-    // (device error, unplug) streaming_ is false but the thread is still joinable
-    if (streaming_.load(std::memory_order_acquire))
+    if (!read_thread_.joinable()) return;
+    // Prefer librtlsdr's documented-safe cancel: flip streaming_ so the read
+    // thread's own async_callback cancels from inside libusb_handle_events.
+    // Give it a bounded window to exit; only if it doesn't (a stalled device
+    // with no completing transfer left to run the callback) fall back to the
+    // cross-thread rtlsdr_cancel_async, which can race librtlsdr's non-atomic
+    // async_status and make handle_events return NOT_FOUND — tripping a
+    // librtlsdr use-after-free (see request_stop_streaming).
+    streaming_.store(false, std::memory_order_release);
+    for (int i = 0; i < 250 && !read_exited_.load(std::memory_order_acquire); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    if (!read_exited_.load(std::memory_order_acquire) && dev_ && api_.CancelAsync)
         api_.CancelAsync(dev_);
-    // always join a started thread — destroying a joinable std::thread calls
-    // std::terminate(), which aborts the whole app on a flaky-USB stop
-    if (read_thread_.joinable()) {
-        read_thread_.join();
-        SPC_LOG_INFO(log_, "RTL-SDR streaming stopped");
-    }
+    // always join — destroying a joinable std::thread calls std::terminate()
+    read_thread_.join();
+    SPC_LOG_INFO(log_, "RTL-SDR streaming stopped");
 }
 
 uint32_t RtlSdrDevice::read_iq(int16_t* buffer, uint32_t max_samples)

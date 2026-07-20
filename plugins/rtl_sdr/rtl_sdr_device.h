@@ -182,6 +182,9 @@ private:
     // removal). close() then abandons the handle instead of issuing more USB
     // I/O on a dongle whose librtlsdr/libusb transfer state is inconsistent.
     std::atomic<bool> faulted_{false};
+    // Set at read-thread exit, so stop_streaming() can tell the callback-thread
+    // self-cancel took effect before falling back to a cross-thread cancel.
+    std::atomic<bool> read_exited_{false};
     std::atomic<uint64_t> dropped_{0};
     std::thread read_thread_;
     bool is_v4_ = false;
