@@ -40,7 +40,7 @@ static constexpr int KRAKEN_SERIAL_BASE = 1000;
 // order — best-effort for reflashed units, with no guaranteed reference mapping.
 static bool detect_kraken(bool relax, uint32_t out_hw_index[NUM_CH], SpcLogContext* log)
 {
-    if (!spc::rtlsdr::RtlSdrDevice::load_api()) return false;
+    if (!spc::rtlsdr::RtlSdrDevice::load_api(log)) return false;
 
     auto devs = spc::rtlsdr::RtlSdrDevice::enumerate();
     bool got[NUM_CH] = {};
@@ -573,7 +573,7 @@ static int start(SpcPluginInstance* inst)
         s->zero_fill[k] = false;
     }
 
-    if (!spc::rtlsdr::RtlSdrDevice::load_api()) {
+    if (!spc::rtlsdr::RtlSdrDevice::load_api(&s->host.cached_log)) {
         SPC_LOG_ERROR(&s->host.cached_log, "KrakenSDR: rtlsdr library not available");
         return 0;  // graceful no-op — pipeline runs, this source produces nothing
     }

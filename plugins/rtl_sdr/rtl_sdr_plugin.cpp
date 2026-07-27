@@ -21,7 +21,7 @@ static struct RtlSdrRegistry {
 
     bool initialized = false;
 
-    void scan()
+    void scan(SpcLogContext* log = nullptr)
     {
         count = 0;
 
@@ -31,7 +31,7 @@ static struct RtlSdrRegistry {
         device_indices[count] = UINT32_MAX;
         count++;
 
-        if (!spc::rtlsdr::RtlSdrDevice::load_api()) {
+        if (!spc::rtlsdr::RtlSdrDevice::load_api(log)) {
             initialized = true;
             return;
         }
@@ -179,7 +179,7 @@ static const SpcPluginDescriptor* scan_devices(const SpcHostServices* svc)
     if (svc && svc->log) log = {svc->log, svc->host_ctx};
 
     SPC_LOG_INFO(&log, "RTL-SDR: scanning for devices...");
-    g_registry.scan();
+    g_registry.scan(&log);
     patch_device_enum();
 
     if (!spc::rtlsdr::RtlSdrDevice::is_api_loaded()) {
