@@ -21,6 +21,14 @@ any other plugin.
 | **rtl_sdr** | — → signal | RTL-SDR I/Q source (data-source plugin — captured by session recording, driven by reinjection replay) | Apache-2.0 plugin code; links **librtlsdr (LGPL-2.1+)** at runtime |
 | **kraken_sdr** | — → 5× signal | KrakenSDR 5-channel coherent RTL-SDR array source (data-source plugin; reuses the `rtl_sdr` device layer) | Apache-2.0 plugin code; links **librtlsdr (LGPL-2.1+)** at runtime |
 
+> **Linux: `rtl_sdr` and `kraken_sdr` need librtlsdr installed separately.** It
+> is `dlopen`ed at runtime rather than linked, so it is in no Speculor archive
+> and the plugins load fine without it — they simply report no devices. Install
+> it with `sudo apt install librtlsdr0` (Debian/Ubuntu), `sudo dnf install
+> rtl-sdr` (Fedora) or `sudo pacman -S rtl-sdr` (Arch). The plugins log the same
+> hint when it is missing. Windows ships `rtlsdr.dll` in the bundle's `vendor/`
+> folder, so nothing extra is needed there.
+
 The ViBe/SuBSENSE CPU algorithms live under `common/bgs/` (derived from the
 [LITIV Framework](https://github.com/plstcharles/litiv), © 2015 Pierre-Luc
 St-Charles, Apache-2.0). They compile into the plugins here and link the Speculor

@@ -97,7 +97,10 @@ public:
     explicit RtlSdrDevice(SpcLogContext* log);
     ~RtlSdrDevice();
 
-    [[nodiscard]] static bool load_api();
+    // Pass a log context to get the "library missing, here is how to install
+    // it" warning. Emitted once per process — every rtl_sdr descriptor query
+    // and every kraken_sdr detect passes through here. Null-safe.
+    [[nodiscard]] static bool load_api(SpcLogContext* log = nullptr);
     [[nodiscard]] static bool is_api_loaded() { return api_.loaded; }
 
     // lifecycle
