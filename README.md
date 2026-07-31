@@ -3,9 +3,9 @@
 Open-source plugins for [Speculor](https://speculor.app) — the real-time
 multi-camera / signal-processing platform. This repository is the public home for
 Speculor plugins that carry **open-source obligations**: code derived from
-permissively-licensed upstreams that should be readable in source form, and plugins
-that link copyleft libraries. They build against the public Speculor SDK exactly like
-any other plugin.
+permissively-licensed upstreams that should be readable in source form, plugins that
+link copyleft libraries, and plugins that are themselves copyleft. They build against
+the public Speculor SDK exactly like any other plugin.
 
 > This is distinct from
 > [speculor-plugin-examples](https://github.com/speculor-app/speculor-plugin-examples)
@@ -20,6 +20,7 @@ any other plugin.
 | **subsense_bgs** | frame → frame | SuBSENSE background subtraction (CPU + Vulkan GPU) | Apache-2.0; LITIV-derived |
 | **rtl_sdr** | — → signal | RTL-SDR I/Q source (data-source plugin — captured by session recording, driven by reinjection replay) | Apache-2.0 plugin code; links **librtlsdr (LGPL-2.1+)** at runtime |
 | **kraken_sdr** | — → 5× signal | KrakenSDR 5-channel coherent RTL-SDR array source (data-source plugin; reuses the `rtl_sdr` device layer) | Apache-2.0 plugin code; links **librtlsdr (LGPL-2.1+)** at runtime |
+| **adsb_display** | table → frame | Interactive ADS-B map: slippy-map tiles, aircraft markers with type-specific silhouettes, airspace and airport layers, trails, tooltips and an aircraft list | **GPL-3.0** — the only copyleft plugin here; marker artwork derives from [tar1090](https://github.com/wiedehopf/tar1090) |
 
 > **Linux: `rtl_sdr` and `kraken_sdr` need librtlsdr installed separately.** It
 > is `dlopen`ed at runtime rather than linked, so it is in no Speculor archive
@@ -69,11 +70,18 @@ ships no LITIV-derived code.
 
 This repository is **mixed-license**. Repository-original code (plugin wrappers,
 scaffolding, build files) is **Apache-2.0** — see the root [`LICENSE`](LICENSE) and
-[`NOTICE`](NOTICE). Individual plugins carry their own obligations:
+[`NOTICE`](NOTICE). Individual plugins carry their own obligations, and one is not
+Apache-2.0 at all:
 
 - `vibe_bgs`, `subsense_bgs` — Apache-2.0, contain LITIV-derived code; **ViBe is
   patent-encumbered** in some jurisdictions.
 - `rtl_sdr`, `kraken_sdr` — Apache-2.0 plugin code linking **librtlsdr (LGPL-2.1+)** at runtime.
+- `adsb_display` — **GPL-3.0-or-later**, the only copyleft plugin in this repository.
+  Its aircraft marker shapes are generated from [tar1090](https://github.com/wiedehopf/tar1090)
+  (GPL-3.0), which cannot be relicensed, so the plugin is distributed under the same
+  terms. Redistributing a built binary carries the GPL-3.0 source-availability
+  obligation for the plugin; that source is this repository. See
+  [`plugins/adsb_display/LICENSE`](plugins/adsb_display/LICENSE).
 
 See each `plugins/<name>/LICENSE` and the root
 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md). The plugins load at runtime against

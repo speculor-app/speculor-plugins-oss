@@ -17,6 +17,25 @@ obligations:
   * plugins/rtl_sdr links librtlsdr (LGPL-2.1-or-later), loaded at runtime. See
     THIRD_PARTY_NOTICES.md and plugins/rtl_sdr/LICENSE.
 
+  * plugins/adsb_display is licensed GPL-3.0-or-later, NOT Apache-2.0 — the only
+    copyleft plugin in this repository. Its aircraft marker shapes
+    (aircraft_shapes.h) are generated from tar1090's markers.js:
+
+        tar1090 — https://github.com/wiedehopf/tar1090
+        Copyright (C) Matthias Wirth and contributors
+        GNU General Public License, version 3.
+
+    Within that set, the C-130 icon is by Peter Lowden, marked in tar1090 as
+    CC BY 4.0; the A320 family, B737 family and e390 icons were contributed by
+    pimlie under tar1090's GPL-3.0. scripts/convert_shapes.py regenerates the
+    header from upstream. See plugins/adsb_display/LICENSE.
+
+    The same plugin embeds 186 country flag images (embedded_flags.h, generated
+    from data/flags/) fetched from flagcdn.com / flagpedia.net, which states they
+    are public domain and free for commercial use; a backlink to
+    https://flagpedia.net is appreciated. scripts/download_flags.py and
+    scripts/embed_flags.py regenerate them.
+
 When compiled, every plugin also links the Speculor Plugin SDK and, through it,
 the third-party libraries bundled in the SDK (OpenCV, FFmpeg, Vulkan, and
 others). Those components are governed by their own terms, reproduced in
