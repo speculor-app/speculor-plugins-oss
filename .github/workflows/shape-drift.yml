@@ -1,0 +1,52 @@
+name: Shape drift
+
+# aircraft_shapes.h is generated from tar1090's markers.js, which moves
+# independently of this repository. Nobody re-ran the generator between March and
+# July 2026, and in that window it silently dropped nine shapes — seven of which
+# k_type_map still referenced, so those aircraft rendered the generic fallback
+# instead of a real silhouette. This job is the thing that would have caught it.
+#
+# Deliberately NOT run on push or pull_request: upstream changing is not a fault
+# in a contributor's branch, and failing their PR for it would train people to
+# ignore the check. A weekly run that fails visibly is enough.
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'     # Mondays 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  regenerate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      # Non-zero exit means a lookup table points at a shape that was not
+      # generated — the failure mode described above. The script explains which.
+      - name: Regenerate shapes from upstream
+        run: python scripts/convert_shapes.py
+
+      - name: Report drift
+        run: |
+          if git diff --quiet -- plugins/adsb_display/aircraft_shapes.h; then
+            echo "No drift: the committed header matches upstream."
+            exit 0
+          fi
+          echo "::warning::aircraft_shapes.h differs from a fresh conversion of tar1090's markers.js"
+          echo
+          echo "Shapes in the committed header but not upstream, or vice versa:"
+          git diff --unified=0 -- plugins/adsb_display/aircraft_shapes.h \
+            | grep -oE '^[-+]static constexpr float k_pts_[a-z0-9_]+' \
+            | sort -u || true
+          echo
+          echo "Regenerate with: python scripts/convert_shapes.py"
+          echo "Review the diff before committing — upstream shapes are GPL-3.0 and"
+          echo "any new attribution belongs in plugins/adsb_display/LICENSE."
+          exit 1
