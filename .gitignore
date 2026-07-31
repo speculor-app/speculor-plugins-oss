@@ -4,3 +4,7 @@ sdk/
 .vs/
 .vscode/
 CMakeUserPresets.json
+
+# Python bytecode from the generator scripts
+__pycache__/
+*.pyc
