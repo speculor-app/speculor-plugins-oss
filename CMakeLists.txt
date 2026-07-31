@@ -79,6 +79,20 @@ find_package(SpeculorSDK REQUIRED)
 include(PluginHelpers)      # spc_add_plugin / spc_enable_gpu / spc_add_gpu_shaders
 include(CompilerWarnings)   # spc_set_warnings
 
+# nlohmann/json — adsb_display parses OpenAIP airspace/airport data with it.
+# Mirrors how speculor-plugins acquires it: prefer a system/vcpkg package, and
+# fall back to the pinned release so a plain checkout still builds.
+include(FetchContent)
+find_package(nlohmann_json CONFIG QUIET)
+if(NOT nlohmann_json_FOUND)
+    FetchContent_Declare(
+        nlohmann_json
+        GIT_REPOSITORY https://github.com/nlohmann/json.git
+        GIT_TAG        v3.11.3
+    )
+    FetchContent_MakeAvailable(nlohmann_json)
+endif()
+
 # local find-modules: RTL-SDR header locator (FindRtlSdr) + downloader (RtlSdr)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/plugins/cmake")
 
@@ -123,7 +137,7 @@ if(_oss_bundles_py)
 else()
     # standalone fallback: static map (keep in sync with scripts/bundles.yaml);
     # no in-dev gate — standalone builds compile every plugin.
-    foreach(_oss_plugin vibe_bgs subsense_bgs rtl_sdr)
+    foreach(_oss_plugin vibe_bgs subsense_bgs rtl_sdr adsb_display)
         set(SPC_PLUGIN_BUNDLE_${_oss_plugin} "oss")
     endforeach()
     set(SPC_PLUGIN_BUNDLE_kraken_sdr "passive-radar")
@@ -152,6 +166,7 @@ add_subdirectory(plugins/vibe_bgs)
 add_subdirectory(plugins/subsense_bgs)
 add_subdirectory(plugins/rtl_sdr)
 add_subdirectory(plugins/kraken_sdr)
+add_subdirectory(plugins/adsb_display)
 
 # ship the licensing files with any install/redistribution (Apache-2.0 §4 / LGPL)
 include(GNUInstallDirs)

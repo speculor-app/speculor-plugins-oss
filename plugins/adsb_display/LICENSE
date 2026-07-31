@@ -1,0 +1,67 @@
+adsb_display — license
+======================
+
+**This plugin is licensed under the GNU General Public License, version 3
+(GPL-3.0-or-later)** — not the repository-root Apache-2.0 that covers the rest
+of this repository.
+
+It is the only GPL-licensed plugin here. The obligation comes from the aircraft
+marker artwork described below, which is GPL-3.0 and cannot be relicensed. The
+plugin's own source is distributed under the same terms so the combined work is
+consistent.
+
+You may obtain the full license text at <https://www.gnu.org/licenses/gpl-3.0>.
+
+Aircraft marker shapes
+----------------------
+
+`aircraft_shapes.h` is generated from tar1090's `markers.js`:
+
+    tar1090 — https://github.com/wiedehopf/tar1090
+    Copyright (C) Matthias Wirth and contributors
+    GNU General Public License, version 3 (GPL-3.0).
+
+`scripts/convert_shapes.py` regenerates the header from that source: it fetches
+`markers.js`, extracts the SVG path data, flattens the bezier curves and emits
+the C++ polygon arrays. The generated file is committed for build reproducibility;
+the script is the authority on how it was produced.
+
+Individual shapes within that set carry their own upstream attribution:
+
+  * the **C-130** icon originates from a FlightAware community thread, by
+    **Peter Lowden**, marked in tar1090 as licensed under
+    **CC BY 4.0** (<https://creativecommons.org/licenses/by/4.0/>).
+    Note: the original forum posting states no license; the CC BY 4.0
+    designation is tar1090's.
+  * the **A320 family**, **B737 family** and **e390** icons were contributed to
+    tar1090 by **pimlie**. No separate license is stated for them upstream, so
+    they fall under tar1090's GPL-3.0.
+
+All other shapes are tar1090's own work under GPL-3.0.
+
+Country flag images
+-------------------
+
+`embedded_flags.h` embeds 186 20x15 PNG country flags, generated from
+`data/flags/` by `scripts/embed_flags.py`. `scripts/download_flags.py` fetches
+them from:
+
+    flagcdn.com / flagpedia.net — https://flagpedia.net/download
+
+Flagpedia states the images are "completely free for commercial and
+non-commercial use (public domain)", derived from Wikimedia Commons vector
+files, with a backlink appreciated but not required. National flags are state
+symbols and are generally not subject to copyright.
+
+What this means when you redistribute
+-------------------------------------
+
+Distributing a built `adsb_display` binary carries the GPL-3.0 obligations for
+the combined work: recipients are entitled to the corresponding source under the
+same terms. That source is this directory, in this public repository.
+
+The plugin loads at runtime against the Speculor engine (proprietary) across the
+documented plugin C ABI, and links the Speculor Plugin SDK (proprietary). Those
+are separate works with their own licenses; the GPL-3.0 grant on this plugin does
+not extend to them, and their licenses do not restrict your rights to this
+plugin's source.
