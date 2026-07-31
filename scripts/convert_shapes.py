@@ -657,6 +657,50 @@ def main():
     generate_header(shapes_data, output_path)
     print(f"\nGenerated {output_path} with {len(shapes_data)} shapes")
 
+    rc = validate_header(output_path, shapes_data)
+    sys.exit(rc)
+
+
+def validate_header(output_path, shapes_data):
+    """Refuse to leave a header whose lookup tables point at absent shapes.
+
+    A k_type_map entry naming a shape that was not generated is worse than no
+    entry at all: lookup() prefix-matches it, find_shape() returns nullptr, and
+    the aircraft draws the generic fallback — where without the entry it would
+    have reached its emitter category and drawn a real silhouette. Seven entries
+    were in that state from March until 2026-07-31 because the converter only
+    warned about dropped shapes and nobody re-read the output.
+    """
+    with open(output_path, encoding="utf-8") as f:
+        header = f.read()
+
+    have = set(shapes_data)
+    problems = []
+
+    type_map = re.search(r"k_type_map\[\]\s*=\s*\{(.*?)\n\};", header, re.S)
+    if type_map:
+        for shape in sorted(set(re.findall(r',\s*"([a-z0-9_]+)"\s*\}', type_map.group(1)))):
+            if shape not in have:
+                problems.append(f"k_type_map -> {shape}")
+
+    cat = re.search(r"category_to_shape[^{]*\{(.*?)\n\}", header, re.S)
+    if cat:
+        for shape in sorted(set(re.findall(r'return\s+"([a-z0-9_]+)"', cat.group(1)))):
+            if shape not in have:
+                problems.append(f"category_to_shape -> {shape}")
+
+    if problems:
+        print("\nERROR: lookup tables reference shapes that were not generated:")
+        for p in problems:
+            print(f"  {p}")
+        print("\nEither the shape failed to convert (check the warnings above) or it\n"
+              "should be dropped from the mapping. Leaving it dangling makes those\n"
+              "aircraft render worse than having no mapping at all.")
+        return 1
+
+    print("Validated: every k_type_map and category_to_shape target resolves.")
+    return 0
+
 
 if __name__ == "__main__":
     main()
