@@ -86,11 +86,23 @@ def extract_shapes(js_content):
             pos += 1
         block = js_content[start:pos - 1]
 
-        # extract path (may use single or double quotes)
-        path_match = re.search(r"path\s*:\s*['\"]([^'\"]+)['\"]", block)
-        if not path_match:
-            continue
-        path_data = path_match.group(1)
+        # Extract path. Two upstream forms: a single quoted string, or an array
+        # of them for shapes drawn as several subpaths (chinook, a10,
+        # gyrocopter). Concatenating the array is correct here because each
+        # element begins with a moveto, which parse_svg_path already treats as
+        # the start of a new subpath — and only the largest subpath is kept as
+        # the outline further down.
+        path_match = re.search(r"path\s*:\s*\[(.*?)\]", block, re.S)
+        if path_match:
+            parts = re.findall(r"['\"]([^'\"]+)['\"]", path_match.group(1))
+            if not parts:
+                continue
+            path_data = " ".join(parts)
+        else:
+            path_match = re.search(r"path\s*:\s*['\"]([^'\"]+)['\"]", block)
+            if not path_match:
+                continue
+            path_data = path_match.group(1)
 
         # extract viewBox
         vb_match = re.search(r"viewBox\s*:\s*'([^']+)'", block)
@@ -106,10 +118,71 @@ def extract_shapes(js_content):
     return shapes
 
 
+_NUM_RE = re.compile(r'[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?')
+
+# parameters consumed by one group of each command
+_ARITY = {'m': 2, 'l': 2, 'h': 1, 'v': 1, 'c': 6, 's': 4, 'q': 4, 't': 2, 'a': 7, 'z': 0}
+
+
+def tokenize_path(d):
+    """Split SVG path data into command letters and parameter tokens.
+
+    A plain number scanner cannot do this correctly. In an elliptical arc the
+    large-arc and sweep flags are single digits that minifiers emit with no
+    separator: "a18.3 18.3 0 001.72-1.54" means flags 0 and 0 followed by
+    x=1.72, but a number scanner reads "001.72" as one value. The arc then has
+    five parameters instead of seven, so it consumes two tokens from whatever
+    command follows and dies on a letter — which is what silently dropped
+    tornado, b52, c5 and s61 from the generated header.
+
+    Scanning with each command's arity in hand fixes it: inside an arc, take
+    parameters 4 and 5 as single characters.
+    """
+    tokens = []
+    i, n = 0, len(d)
+    cmd = None
+    while i < n:
+        ch = d[i]
+        if ch in 'MmLlHhVvCcSsQqTtAaZz':
+            tokens.append(ch)
+            cmd = ch
+            i += 1
+            continue
+        if ch in ' ,\t\r\n':
+            i += 1
+            continue
+        if cmd is None or _ARITY.get(cmd.lower(), 0) == 0:
+            i += 1          # stray token with no command to own it
+            continue
+        # One parameter group for the command in force. A bare group with no
+        # letter in front of it is an implicit repeat, which this loop handles
+        # without extra work.
+        for k in range(_ARITY[cmd.lower()]):
+            while i < n and d[i] in ' ,\t\r\n':
+                i += 1
+            if i >= n:
+                break
+            if cmd in 'Aa' and k in (3, 4):
+                tokens.append(d[i])       # flag: exactly one character
+                i += 1
+                continue
+            m = _NUM_RE.match(d, i)
+            if not m:
+                i += 1
+                break
+            tokens.append(m.group())
+            i = m.end()
+        # after a moveto, further coordinate pairs are implicit linetos
+        if cmd == 'M':
+            cmd = 'L'
+        elif cmd == 'm':
+            cmd = 'l'
+    return tokens
+
+
 def parse_svg_path(d):
     """Parse SVG path data into a list of subpaths, each a list of commands."""
-    # tokenize: split into commands and numbers
-    tokens = re.findall(r'[MmLlHhVvCcSsQqTtAaZz]|[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?', d)
+    tokens = tokenize_path(d)
 
     subpaths = []
     current = []
