@@ -78,11 +78,11 @@ else()
         string(APPEND CMAKE_C_FLAGS_RELEASE   " -g1")
     endif()
 endif()
-# clang-cl (LLVM on the MSVC ABI) has no /GL; CMake would emit -flto=thin,
-# whose bitcode objects only link under lld-link. Skip IPO there rather than
-# silently switching linkers — see speculor-sdk/CMakeLists.txt for the same gate.
-if(MSVC AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-    message(STATUS "Speculor: IPO off under clang-cl (ThinLTO would require lld-link)")
+# clang-cl has no /GL; CMake emits -flto=thin, whose bitcode objects only link
+# under lld-link. CMake picks lld-link for clang-cl by default, but verify —
+# link.exe cannot read those objects and fails obscurely.
+if(MSVC AND CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND NOT CMAKE_LINKER MATCHES "lld-link")
+    message(STATUS "Speculor: IPO off — clang-cl ThinLTO needs lld-link, have ${CMAKE_LINKER}")
 else()
     set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
 endif()
