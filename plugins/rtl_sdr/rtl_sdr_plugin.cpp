@@ -123,7 +123,7 @@ static void patch_device_enum()
 // The tuner only supports a discrete set of gains (queried into g_registry.gains
 // at open); we keep the user-facing value a device-independent dB float so it
 // persists cleanly, and snap here when applying.
-static void apply_manual_gain(spc::rtlsdr::RtlSdrDevice* dev, float gain_db, SpcLogContext* log)
+static void apply_manual_gain(spc::rtlsdr::RtlSdrDevice* dev, float gain_db, [[maybe_unused]] SpcLogContext* log)
 {
     int target = static_cast<int>(gain_db * 10.0f + (gain_db >= 0.0f ? 0.5f : -0.5f)); // tenths dB
     if (g_registry.gain_count > 0) {
