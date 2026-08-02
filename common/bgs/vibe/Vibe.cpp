@@ -186,28 +186,32 @@ namespace spclib::bgs
                 }
                 else
                 {
-                    // pre-fetch all random values for deterministic RNG advancement
-                    const uint32_t r0 = _rnd_gen.fast();
-                    const uint32_t r1 = _rnd_gen.fast();
-                    const uint32_t r2 = _rnd_gen.fast();
-                    const uint32_t r3 = _rnd_gen.fast();
-                    const uint32_t r4 = _rnd_gen.fast();
+                    // Draws 1, 3 and 4 are consumed only by branches taken once
+                    // per `learning_rate` pixels, so fetching all five up front
+                    // discarded most of them -- five table loads on every
+                    // background pixel, which is the bulk of them. peek() the
+                    // ones a branch actually takes and skip() the whole block:
+                    // the stream advances exactly as five fast() calls would, so
+                    // the model evolves identically.
+                    const uint32_t r0 = _rnd_gen.peek(0);
+                    const uint32_t r2 = _rnd_gen.peek(2);
 
                     if ((r0 & and_lr) == 0)
                     {
-                        T *const bg_img_pix_data{&bg_ptrs[r1 & and_bg][color_pix_offset]};
+                        T *const bg_img_pix_data{&bg_ptrs[_rnd_gen.peek(1) & and_bg][color_pix_offset]};
                         bg_img_pix_data[0] = pix_data[0];
                         bg_img_pix_data[1] = pix_data[1];
                         bg_img_pix_data[2] = pix_data[2];
                     }
                     if ((r2 & and_lr) == 0)
                     {
-                        const int neigh_data{get_neighbor_position_3x3(x, y, _image.size, r3) * 3};
-                        T *const xy_rand_data{&bg_ptrs[r4 & and_bg][neigh_data]};
+                        const int neigh_data{get_neighbor_position_3x3(x, y, _image.size, _rnd_gen.peek(3)) * 3};
+                        T *const xy_rand_data{&bg_ptrs[_rnd_gen.peek(4) & and_bg][neigh_data]};
                         xy_rand_data[0] = pix_data[0];
                         xy_rand_data[1] = pix_data[1];
                         xy_rand_data[2] = pix_data[2];
                     }
+                    _rnd_gen.skip(5);
                 }
             }
         }
@@ -281,24 +285,23 @@ namespace spclib::bgs
                     fg_ptr[pix_offset] = 0;
                     const T pix_data = img_ptr[pix_offset];
 
-                    // pre-fetch all random values for deterministic RNG advancement
-                    // and better instruction scheduling (5 sequential table lookups
-                    // are contiguous in cache)
-                    const uint32_t r0 = _rnd_gen.fast();
-                    const uint32_t r1 = _rnd_gen.fast();
-                    const uint32_t r2 = _rnd_gen.fast();
-                    const uint32_t r3 = _rnd_gen.fast();
-                    const uint32_t r4 = _rnd_gen.fast();
+                    // Draws 1, 3 and 4 are consumed only by branches taken once
+                    // per `learning_rate` pixels; peek() those and skip() the
+                    // block so the stream still advances by five, leaving the
+                    // model evolution identical without the discarded loads.
+                    const uint32_t r0 = _rnd_gen.peek(0);
+                    const uint32_t r2 = _rnd_gen.peek(2);
 
                     if ((r0 & and_lr) == 0)
                     {
-                        bg_ptrs[r1 & and_bg][pix_offset] = pix_data;
+                        bg_ptrs[_rnd_gen.peek(1) & and_bg][pix_offset] = pix_data;
                     }
                     if ((r2 & and_lr) == 0)
                     {
-                        const int neigh_data{get_neighbor_position_3x3(x, y, _image.size, r3)};
-                        bg_ptrs[r4 & and_bg][neigh_data] = pix_data;
+                        const int neigh_data{get_neighbor_position_3x3(x, y, _image.size, _rnd_gen.peek(3))};
+                        bg_ptrs[_rnd_gen.peek(4) & and_bg][neigh_data] = pix_data;
                     }
+                    _rnd_gen.skip(5);
                 }
             }
         }
