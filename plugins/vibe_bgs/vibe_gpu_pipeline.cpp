@@ -322,14 +322,17 @@ bool VibeGpuPipeline::record(VulkanContext& ctx, VkCommandBuffer cmd,
     if (has_mask)
         pc.frame_number |= 0x80000000u;
 
-    // pass 1: process
+    // pass 1: process. 64x1 groups, matching the shader: a 16-wide group splits
+    // every 32-thread warp across two rows, so each warp issues two disjoint
+    // memory runs instead of one contiguous one. Init keeps 16x16 -- it runs
+    // once, and its shader declares that shape.
     VkPipeline pipeline = use_wide_layout_ ? process_wide_pipeline_ : process_pipeline_;
     VkShaderEXT shader  = use_wide_layout_ ? process_wide_shader_   : process_shader_;
     cmd_dispatch_compute(ctx, pipeline, shader,
                          pipeline_layout_, desc_set_,
                          push_bufs_, push_sizes_, 5,
                          pc,
-                         (params.width + 15) / 16, (params.height + 15) / 16);
+                         (params.width + 63) / 64, params.height);
 
     // pass 2: pack mask (wide layout only)
     if (use_wide_layout_)
