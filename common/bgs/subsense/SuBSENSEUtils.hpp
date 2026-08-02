@@ -100,11 +100,14 @@ namespace spclib::bgs
         friend class SuBSENSE;
 
     protected:
-        int32_t bg_samples;
-        int32_t required_matches;
-        float initial_color_threshold;
-        int32_t initial_desc_threshold;
-        float learning_rate_lower;
-        float learning_rate_upper;
+        // set_bg_samples() guards on the current value, so the constructors read
+        // these before writing them; leaving them indeterminate is UB the
+        // optimizer is entitled to fold the whole caller away on.
+        int32_t bg_samples{DEFAULT_BG_SAMPLES};
+        int32_t required_matches{DEFAULT_REQUIRED_MATCHES};
+        float initial_color_threshold{DEFAULT_INITIAL_COLOR_THRESHOLD};
+        int32_t initial_desc_threshold{DEFAULT_INITIAL_DESC_THRESHOLD};
+        float learning_rate_lower{DEFAULT_LEARNING_RATE_LOWER};
+        float learning_rate_upper{DEFAULT_LEARNING_RATE_UPPER};
     };
 }

@@ -82,6 +82,36 @@ namespace spclib::bgs
         m_bg_colors.resize(N * np * m_channels);
         m_bg_descs.resize(N * np * m_channels); // for color: 3 descriptors per pixel per sample
 
+        // An LBSP descriptor is a function of the position and the frame alone,
+        // so it is the same whichever sample lands on that position. Computing
+        // it once per pixel instead of once per (sample, pixel) does the 16
+        // neighbour comparisons N times fewer -- at 4K with the default 50
+        // samples that is the difference between ~45 s and under a second, and
+        // 45 s is long enough for the node to outlive a pipeline stop and read
+        // its input frame after the engine has freed it.
+        const int desc_threshold = static_cast<int>(m_params.initial_color_threshold * 0.3f);
+        std::vector<uint16_t> desc_map(np * m_channels);
+        for (int y = 0; y < m_height; ++y)
+        {
+            for (int x = 0; x < m_width; ++x)
+            {
+                const size_t idx = static_cast<size_t>(y) * m_width + x;
+                if (m_channels == 1)
+                {
+                    desc_map[idx] = lbsp::compute_mono(img.data, m_stride, x, y,
+                                                       m_width, m_height,
+                                                       img.data[y * m_stride + x],
+                                                       desc_threshold);
+                }
+                else
+                {
+                    lbsp::compute_color(img.data, m_stride, x, y, m_width, m_height,
+                                        img.data + y * m_stride + x * 3,
+                                        desc_threshold, &desc_map[idx * 3]);
+                }
+            }
+        }
+
         // initialize all N samples from the first frame with spatial jitter
         std::uniform_int_distribution<int> jitter_dist(-2, 2);
 
@@ -97,16 +127,12 @@ namespace spclib::bgs
                     int jy = std::clamp(y + jitter_dist(m_rng), 0, m_height - 1);
                     int jx = std::clamp(x + jitter_dist(m_rng), 0, m_width - 1);
 
+                    const size_t j_idx = static_cast<size_t>(jy) * m_width + jx;
+
                     if (m_channels == 1)
                     {
-                        uint8_t val = img.data[jy * m_stride + jx];
-                        m_bg_colors[s * np + pixel_idx] = val;
-
-                        // compute LBSP descriptor for the jittered position
-                        uint16_t desc = lbsp::compute_mono(img.data, m_stride, jx, jy,
-                                                           m_width, m_height, val,
-                                                           static_cast<int>(m_params.initial_color_threshold * 0.3f));
-                        m_bg_descs[s * np + pixel_idx] = desc;
+                        m_bg_colors[s * np + pixel_idx] = img.data[jy * m_stride + jx];
+                        m_bg_descs[s * np + pixel_idx] = desc_map[j_idx];
                     }
                     else
                     {
@@ -116,14 +142,10 @@ namespace spclib::bgs
                         m_bg_colors[color_base + 1] = src[1];
                         m_bg_colors[color_base + 2] = src[2];
 
-                        uint16_t desc[3];
-                        lbsp::compute_color(img.data, m_stride, jx, jy,
-                                           m_width, m_height, src,
-                                           static_cast<int>(m_params.initial_color_threshold * 0.3f), desc);
                         size_t desc_base = (s * np + pixel_idx) * 3;
-                        m_bg_descs[desc_base + 0] = desc[0];
-                        m_bg_descs[desc_base + 1] = desc[1];
-                        m_bg_descs[desc_base + 2] = desc[2];
+                        m_bg_descs[desc_base + 0] = desc_map[j_idx * 3 + 0];
+                        m_bg_descs[desc_base + 1] = desc_map[j_idx * 3 + 1];
+                        m_bg_descs[desc_base + 2] = desc_map[j_idx * 3 + 2];
                     }
                 }
             }
