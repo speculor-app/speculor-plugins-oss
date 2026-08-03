@@ -49,7 +49,16 @@ namespace spclib::bgs
         Img frameImg(init_img.data, *m_orig_img_size);
         split_img(frameImg, img_split, static_cast<int>(m_num_processes_parallel));
 
-        m_random_generators.resize(m_num_processes_parallel);
+        // Enter the table at a different position per worker: default-constructed
+        // generators all start at 0 and walk it in lockstep, so every worker
+        // applied an identical pattern of random model updates to its own
+        // horizontal strip.
+        const uint64_t stride = Pcg32::stride_for(m_num_processes_parallel);
+        m_random_generators.clear();
+        m_random_generators.reserve(m_num_processes_parallel);
+        for (size_t i{0}; i < m_num_processes_parallel; ++i)
+            m_random_generators.emplace_back(i * stride);
+
         m_bg_img_samples.resize(m_num_processes_parallel);
         if (m_orig_img_size->bytes_per_channel == 1)
         {
