@@ -5,7 +5,11 @@ name: Build plugins
 # OpenCV/FFmpeg is needed — only a compiler + Ninja (+ a few system libs on Linux).
 
 on:
+  # push is limited to main: an unfiltered push trigger rebuilt every branch
+  # and double-built every PR (once for the push, once for the PR), which
+  # turned each feature branch into a stream of failure mail.
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
