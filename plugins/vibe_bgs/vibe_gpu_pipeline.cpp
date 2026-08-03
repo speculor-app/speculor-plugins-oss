@@ -134,7 +134,10 @@ bool VibeGpuPipeline::prepare(VulkanContext& ctx, uint32_t width, uint32_t heigh
     frame_byte_size_ = std::max(frame_byte_size_, VkDeviceSize(4));
     mask_byte_size_ = std::max(mask_byte_size_, VkDeviceSize(4));
     model_buf_size = std::max(model_buf_size, VkDeviceSize(4));
-    output_buf_size_ = std::max(output_buf_size_, VkDeviceSize(4));
+    // Rounded to 4: the output is cleared with vkCmdFillBuffer each frame, and
+    // a fill range has to be a whole number of words. The padding is past the
+    // last pixel, so nothing reads it.
+    output_buf_size_ = (std::max(output_buf_size_, VkDeviceSize(4)) + 3) & ~VkDeviceSize(3);
     staging_out_size_ = std::max(staging_out_size_, VkDeviceSize(4));
 
     // device-local buffers (plugin-owned: bg_model + detect_mask + packed).
@@ -314,6 +317,14 @@ bool VibeGpuPipeline::record(VulkanContext& ctx, VkCommandBuffer cmd,
         recorded_transfer = true;
         mask_upload_needed_ = false;
     }
+
+    // Zero the output first so the shader only has to OR in the foreground
+    // bytes. Without it every pixel needs a read-clear-write of its shared
+    // packed word (an atomicAnd + atomicOr pair) purely to erase whatever the
+    // previous frame left in this ring slot.
+    vkCmdFillBuffer(cmd_buf_, out_device, 0, output_buf_size_, 0u);
+    recorded_transfer = true;
+
     if (recorded_transfer)
         barrier_transfer_to_compute();
 

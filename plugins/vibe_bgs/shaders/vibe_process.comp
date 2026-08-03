@@ -87,13 +87,13 @@ uint read_mask_byte(uint byte_offset)
     return (detect_mask.data[word_idx] >> (byte_idx * 8u)) & 0xFFu;
 }
 
-// write one byte to output mask (always uint8, atomic for packed access)
-void write_mask_byte(uint byte_offset, uint value)
+// Set one byte of the output mask. The host zeroes the buffer before the
+// dispatch, so a background pixel writes nothing at all and a foreground one
+// only ORs its byte into the word it shares with three neighbours.
+void set_mask_byte(uint byte_offset, uint value)
 {
     uint word_idx = byte_offset >> 2u;
-    uint byte_idx = byte_offset & 3u;
-    uint shift = byte_idx * 8u;
-    atomicAnd(output_mask.data[word_idx], ~(0xFFu << shift));
+    uint shift = (byte_offset & 3u) * 8u;
     atomicOr(output_mask.data[word_idx], (value & 0xFFu) << shift);
 }
 
@@ -131,10 +131,7 @@ void main()
     if (has_detect_mask)
     {
         if (read_mask_byte(uint(pixel_idx)) == 0u)
-        {
-            write_mask_byte(uint(pixel_idx), 0u);
             return;
-        }
     }
 
     // elements per sample plane (channel units)
@@ -185,12 +182,10 @@ void main()
 
     if (good_count < uint(pc.required_bg_samples))
     {
-        write_mask_byte(uint(pixel_idx), 255u);
+        set_mask_byte(uint(pixel_idx), 255u);
     }
     else
     {
-        write_mask_byte(uint(pixel_idx), 0u);
-
         uint seed = pcg_hash(uint(pixel_idx) * 1664525u + actual_frame * 2654435761u);
         uint r0 = pcg_hash(seed);
         uint r1 = pcg_hash(seed + 1u);
