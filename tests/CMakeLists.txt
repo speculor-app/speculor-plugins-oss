@@ -90,3 +90,18 @@ if(_sdr)
     endforeach()
     message(STATUS "[tests] no-hardware registered for: ${_sdr}")
 endif()
+
+# ── adsb_display: the parts that survive without a display ───────────
+# Rendering cannot be asserted headlessly, but the waypoints list is what a
+# .speculor file stores and restores — a lossy round-trip loses user data
+# silently. The rest is robustness against inputs the GUI really produces.
+if(TARGET adsb_display)
+    spc_add_plugin_test(spc_adsb_display_tests
+        SOURCES adsb_display_runner.cpp
+        PLUGINS adsb_display
+    )
+    add_test(NAME display.adsb_display
+             COMMAND spc_adsb_display_tests $<TARGET_FILE:adsb_display>)
+    set_tests_properties(display.adsb_display PROPERTIES TIMEOUT 120)
+    message(STATUS "[tests] display registered for: adsb_display")
+endif()
