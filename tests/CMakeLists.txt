@@ -40,3 +40,28 @@ foreach(_p ${_present})
 endforeach()
 
 message(STATUS "[tests] conformance registered for: ${_present}")
+
+# ── behavioural: background subtraction ──────────────────────────────
+# Only the BGS plugins share an input/output contract specific enough to assert
+# against — image in, foreground mask out. The SDR sources need hardware and
+# adsb_display needs a populated track table, so both are covered elsewhere.
+set(_bgs "")
+foreach(_p vibe_bgs subsense_bgs)
+    if(TARGET ${_p})
+        list(APPEND _bgs ${_p})
+    endif()
+endforeach()
+
+if(_bgs)
+    spc_add_plugin_test(spc_bgs_behaviour
+        SOURCES bgs_behaviour_runner.cpp
+        PLUGINS ${_bgs}
+    )
+    foreach(_p ${_bgs})
+        add_test(NAME behaviour.${_p}
+                 COMMAND spc_bgs_behaviour $<TARGET_FILE:${_p}>)
+        # Slower than conformance: each case settles the model over ~180 frames.
+        set_tests_properties(behaviour.${_p} PROPERTIES TIMEOUT 300)
+    endforeach()
+    message(STATUS "[tests] behaviour registered for: ${_bgs}")
+endif()
