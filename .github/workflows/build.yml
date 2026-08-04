@@ -68,7 +68,14 @@ jobs:
       # std::execution::par (libstdc++ routes it through Intel TBB).
       - name: Install Linux build deps
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y ninja-build libva-dev libdrm-dev libtbb-dev librtlsdr-dev
+        # libcurl is needed to *link*, not just to build: spclib_http is static
+        # and exports $<LINK_ONLY:CURL::libcurl>, and when find_package(CURL)
+        # fails the SDK config synthesises an empty CURL::libcurl so configure
+        # still succeeds. A Linux shared library may carry undefined symbols, so
+        # adsb_display then builds clean and cannot be dlopened —
+        # "undefined symbol: curl_easy_perform" — which only shows up once
+        # something actually loads it.
+        run: sudo apt-get update && sudo apt-get install -y ninja-build libva-dev libdrm-dev libtbb-dev librtlsdr-dev libcurl4-openssl-dev
 
       # ── Windows toolchain (MSVC + Ninja) ─────────────────────────────
       - name: Setup MSVC dev environment (Windows)
@@ -97,9 +104,16 @@ jobs:
       - name: Configure
         shell: bash
         run: |
+          # PORTABLE_BUILD pins the ISA baseline to x86-64-v3, the same one
+          # releases ship. Without it the build takes -march=native, which
+          # targets whatever CPU the runner happens to advertise — on a cloud VM
+          # that can include instruction sets the hypervisor does not actually
+          # enable, and the result is a SIGILL at first use rather than a build
+          # error. It also means CI would be exercising a binary nobody ships.
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_PREFIX_PATH="${{ steps.sdk.outputs.root }}" \
+            -DPORTABLE_BUILD=ON \
             -DSPECULOR_BUILD_TESTS=ON
 
       - name: Build
