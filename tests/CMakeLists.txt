@@ -65,3 +65,28 @@ if(_bgs)
     endforeach()
     message(STATUS "[tests] behaviour registered for: ${_bgs}")
 endif()
+
+# ── no-hardware paths: SDR sources ───────────────────────────────────
+# CI has no radio, but the paths worth covering do not need one: scanning with
+# nothing attached, starting with no device selected, and the shutdown sequence
+# — which is where the librtlsdr heap corruption and the unbounded-stop bugs
+# both lived.
+set(_sdr "")
+foreach(_p rtl_sdr kraken_sdr)
+    if(TARGET ${_p})
+        list(APPEND _sdr ${_p})
+    endif()
+endforeach()
+
+if(_sdr)
+    spc_add_plugin_test(spc_sdr_nohardware
+        SOURCES sdr_nohardware_runner.cpp
+        PLUGINS ${_sdr}
+    )
+    foreach(_p ${_sdr})
+        add_test(NAME nohardware.${_p}
+                 COMMAND spc_sdr_nohardware $<TARGET_FILE:${_p}>)
+        set_tests_properties(nohardware.${_p} PROPERTIES TIMEOUT 120)
+    endforeach()
+    message(STATUS "[tests] no-hardware registered for: ${_sdr}")
+endif()
