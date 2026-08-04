@@ -185,6 +185,22 @@ add_subdirectory(plugins/rtl_sdr)
 add_subdirectory(plugins/kraken_sdr)
 add_subdirectory(plugins/adsb_display)
 
+# Plugin tests — opt-in. Guarded on the harness header rather than on an SDK
+# version so a build against an older published bundle keeps working instead of
+# failing the configure on a missing include. _add_subdirectory bypasses the
+# release gate above, which keys off plugin bundle names and does not apply here.
+option(SPECULOR_BUILD_TESTS "Build the plugin test suite" OFF)
+if(SPECULOR_BUILD_TESTS)
+    if(EXISTS "${SPC_PLUGIN_COMMON_DIR}/testing/conformance.h")
+        enable_testing()
+        _add_subdirectory(tests)
+    else()
+        message(WARNING
+            "SPECULOR_BUILD_TESTS=ON but the SDK at ${SPC_PLUGIN_COMMON_DIR} carries no "
+            "testing/ harness (needs SDK >= 0.31.6) — skipping plugin tests")
+    endif()
+endif()
+
 # ship the licensing files with any install/redistribution (Apache-2.0 §4 / LGPL)
 include(GNUInstallDirs)
 install(FILES

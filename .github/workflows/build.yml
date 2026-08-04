@@ -99,7 +99,8 @@ jobs:
         run: |
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_PREFIX_PATH="${{ steps.sdk.outputs.root }}"
+            -DCMAKE_PREFIX_PATH="${{ steps.sdk.outputs.root }}" \
+            -DSPECULOR_BUILD_TESTS=ON
 
       - name: Build
         shell: bash
@@ -108,3 +109,17 @@ jobs:
       - name: List built plugins
         shell: bash
         run: ls -la build/plugins
+
+      # The conformance runner dlopens each built plugin, and those link the
+      # bundle's shared libraries, which sit in the extracted SDK rather than
+      # anywhere the loader looks by default. Without this a perfectly good
+      # plugin fails to load and reads as a conformance failure.
+      - name: Run plugin tests
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            export PATH="${{ steps.sdk.outputs.root }}/bin:${{ steps.sdk.outputs.root }}/lib:$PATH"
+          else
+            export LD_LIBRARY_PATH="${{ steps.sdk.outputs.root }}/lib:${LD_LIBRARY_PATH:-}"
+          fi
+          ctest --test-dir build --output-on-failure --timeout 120
