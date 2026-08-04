@@ -30,7 +30,7 @@ void check(bool cond, const std::string& what) {
     if (!cond) ++failures;
 }
 
-bool near(double a, double b, double eps = 1e-9) { return std::fabs(a - b) < eps; }
+bool approx_eq(double a, double b, double eps = 1e-9) { return std::fabs(a - b) < eps; }
 
 // Column order matches the descriptor: name, type(enum), lat, lon, alt.
 SpcListRow make_waypoint(const char* name, int32_t type, double lat, double lon, double alt) {
@@ -92,9 +92,9 @@ int main(int argc, char** argv) {
             for (size_t i = 0; i < in.size(); ++i) {
                 if (std::strcmp(out[i].cells[0].string_val, in[i].cells[0].string_val) != 0)
                     names_ok = false;
-                if (!near(out[i].cells[2].float64_val, in[i].cells[2].float64_val) ||
-                    !near(out[i].cells[3].float64_val, in[i].cells[3].float64_val) ||
-                    !near(out[i].cells[4].float64_val, in[i].cells[4].float64_val))
+                if (!approx_eq(out[i].cells[2].float64_val, in[i].cells[2].float64_val) ||
+                    !approx_eq(out[i].cells[3].float64_val, in[i].cells[3].float64_val) ||
+                    !approx_eq(out[i].cells[4].float64_val, in[i].cells[4].float64_val))
                     coords_ok = false;
                 if (out[i].cells[1].enum_val != in[i].cells[1].enum_val) enums_ok = false;
             }
@@ -107,10 +107,10 @@ int main(int argc, char** argv) {
 
         // A host asking for fewer rows than exist must not be handed more than
         // it allocated — the classic buffer overrun in this shape of API.
-        SpcListRow small[1]{};
+        SpcListRow one_row[1]{};
         int32_t small_count = -1;
         const int trunc_rc = vt->get_list_rows(plugin.instance(), "waypoints",
-                                               small, 1, &small_count);
+                                               one_row, 1, &small_count);
         check(small_count <= 1,
               "get_list_rows respects max_rows and never overfills");
         std::printf("    max_rows=1 request returned rc=%d count=%d\n", trunc_rc, small_count);
