@@ -14,6 +14,7 @@ Speculor — and everything under it (`speculor-app`, `speculor-sdk`, `speculor-
 - **Commit messages and PR titles follow Conventional Commits** (`type(scope): subject` — full rules in `CONTRIBUTING.md`, enforced by CI on PRs). Release notes are generated from `feat`/`fix`/`perf` subjects, so write them for a user reading the changelog. Applies to all four Speculor repos.
 - **ALWAYS merge PRs with a merge commit — never squash, never rebase.** `gh pr merge <n> --merge --delete-branch`. Applies to every Speculor repo, whatever a given repo's existing history happens to show, and regardless of whether the PR has one commit or twenty. Squashing throws away the per-commit messages, which are the record of *why* each change was made. After merging: `git checkout main && git pull`, then drop the local branch.
 - **Never merge with a red Build check.** CI builds against the latest *published* SDK bundle from `speculor-sdk-dist`, so a PR that needs unreleased SDK API stays open until that SDK release is published (this exact skew broke main on 2026-07-04: `sdr_source_helpers.h` was merged before any bundle contained it). Build (Linux) / Build (Windows) / Conventional commits are required checks on `main`.
+- **Every new plugin ships with tests, and must be added to `tests/CMakeLists.txt` by name.** Unlike `speculor-plugins`, the list here is explicit — a plugin missing from it is never tested, which is indistinguishable from a plugin that passes. Add it to `_candidates` for conformance, then add a behavioural test for whatever contract it actually has. Verify with `ctest -R <name>` rather than assuming registration worked. See **Tests** below.
 - **Update docs before committing** — keep README.md, this file, NOTICE and
   THIRD_PARTY_NOTICES.md in sync with plugin/licensing changes.
 - This is a **public, mixed-license** repo. Treat licensing carefully: every
@@ -64,7 +65,28 @@ angle-includes (`<bgs/CoreBgs.hpp>`, `<include/pcg32.hpp>`); `${SPC_OSS_COMMON_D
 on the include path resolves the plugin's own `<bgs/vibe/Vibe.hpp>`. The two `bgs/`
 include trees are disjoint, so there is no collision.
 
+## Tests
+
+`-DSPECULOR_BUILD_TESTS=ON` builds `tests/`; run with `ctest --test-dir build --output-on-failure`. Ten tests run per platform in CI, and `Build (Linux)` / `Build (Windows)` are required checks.
+
+**The plugin list is explicit, and that is the trap.** `tests/CMakeLists.txt` holds a `_candidates` list filtered through `if(TARGET ...)` — the filter exists so a plugin held back by the release gate drops out instead of failing the configure, *not* to discover new plugins. Nothing warns you about a plugin you never added; it is simply never tested, which reads exactly like a plugin that passes. (`speculor-plugins` auto-discovers instead, because at ~140 plugins a hand-written list would be stale within a week.)
+
+Four tiers, each registered per plugin so a failure names the plugin:
+
+| Tier | Runner | Covers |
+|---|---|---|
+| `conformance.<plugin>` | `conformance_runner.cpp` | every plugin — loadable, ABI-honest |
+| `behaviour.<plugin>` | `bgs_behaviour_runner.cpp` | BGS pair — image in, foreground mask out |
+| `nohardware.<plugin>` | `sdr_nohardware_runner.cpp` | SDR sources — no-device paths |
+| `display.<plugin>` | `adsb_display_runner.cpp` | waypoint round-trip, hostile inputs |
+
+Conformance is the floor, not the goal: it proves the plugin loads and answers the ABI honestly, never that it works. Pick the tier that matches the plugin's contract — and where no hardware exists in CI, the no-device paths are still worth asserting, since the librtlsdr heap corruption and the unbounded-stop bugs both lived there.
+
+The harness ships in the bundle at `include/speculor_common/testing/`, which `spc_add_plugin_test` puts on the include path — so a runner includes it as `<testing/conformance.h>`, `<testing/plugin_under_test.h>`, `<testing/fake_host.h>`. `PluginUnderTest` loads the built plugin through its exported `spc_plugin_vtable`, `FakeHost` stands in for `SpcHostServices`, and `run_conformance()` returns a report rather than asserting.
+
+It arrives with the bundle CI already downloads — but a harness fix only reaches this repo when a **new bundle is published**, since the build resolves the latest published release rather than a pinned version.
+
 ## CI
 
 `.github/workflows/build.yml` downloads the latest published SDK bundle from
-`speculor-sdk-dist` and builds the plugins on Windows + Linux.
+`speculor-sdk-dist`, builds the plugins on Windows + Linux, and runs `ctest`.
