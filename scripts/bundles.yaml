@@ -26,6 +26,7 @@ bundles:
       - plugins/vibe_bgs
       - plugins/subsense_bgs
       - plugins/rtl_sdr
+      - plugins/nesdr
       - plugins/adsb_display
     extras:
       # adsb_display renders airspace and airport layers from OpenAIP data that

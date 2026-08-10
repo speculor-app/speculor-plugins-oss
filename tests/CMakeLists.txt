@@ -9,6 +9,7 @@ set(_candidates
     vibe_bgs
     subsense_bgs
     rtl_sdr
+    nesdr
     kraken_sdr
     adsb_display
 )
@@ -72,7 +73,7 @@ endif()
 # — which is where the librtlsdr heap corruption and the unbounded-stop bugs
 # both lived.
 set(_sdr "")
-foreach(_p rtl_sdr kraken_sdr)
+foreach(_p rtl_sdr nesdr kraken_sdr)
     if(TARGET ${_p})
         list(APPEND _sdr ${_p})
     endif()
@@ -89,6 +90,24 @@ if(_sdr)
         set_tests_properties(nohardware.${_p} PROPERTIES TIMEOUT 120)
     endforeach()
     message(STATUS "[tests] no-hardware registered for: ${_sdr}")
+endif()
+
+# ── nesdr: the per-model capability table ────────────────────────────
+# What nesdr adds over rtl_sdr is entirely the gating — which controls are real
+# on which NooElec board — and none of it needs a radio: the profile is picked
+# by the Model parameter, and the contract shows up in set_parameter's return
+# code and get_parameter's DISABLED flag. Three of the gates exist because the
+# ungated call misbehaves rather than no-ops (offset tuning is routed to the
+# bias tee on an R820T2, direct sampling reaches an unwired pin, a SMArTee's
+# bias tee is not on the GPIO at all).
+if(TARGET nesdr)
+    spc_add_plugin_test(spc_nesdr_models
+        SOURCES nesdr_models_runner.cpp
+        PLUGINS nesdr
+    )
+    add_test(NAME models.nesdr COMMAND spc_nesdr_models $<TARGET_FILE:nesdr>)
+    set_tests_properties(models.nesdr PROPERTIES TIMEOUT 120)
+    message(STATUS "[tests] model-capability registered for: nesdr")
 endif()
 
 # ── adsb_display: the parts that survive without a display ───────────
