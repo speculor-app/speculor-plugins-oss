@@ -154,7 +154,7 @@ if(_oss_bundles_py)
 else()
     # standalone fallback: static map (keep in sync with scripts/bundles.yaml);
     # no in-dev gate — standalone builds compile every plugin.
-    foreach(_oss_plugin vibe_bgs subsense_bgs rtl_sdr adsb_display)
+    foreach(_oss_plugin vibe_bgs subsense_bgs rtl_sdr nesdr adsb_display)
         set(SPC_PLUGIN_BUNDLE_${_oss_plugin} "oss")
     endforeach()
     set(SPC_PLUGIN_BUNDLE_kraken_sdr "passive-radar")
@@ -182,6 +182,7 @@ endmacro()
 add_subdirectory(plugins/vibe_bgs)
 add_subdirectory(plugins/subsense_bgs)
 add_subdirectory(plugins/rtl_sdr)
+add_subdirectory(plugins/nesdr)
 add_subdirectory(plugins/kraken_sdr)
 add_subdirectory(plugins/adsb_display)
 
