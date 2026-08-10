@@ -19,10 +19,11 @@ the public Speculor SDK exactly like any other plugin.
 | **vibe_bgs** | frame → frame | ViBe background subtraction (CPU + Vulkan GPU) | Apache-2.0; LITIV-derived; **ViBe is patent-encumbered** in some jurisdictions |
 | **subsense_bgs** | frame → frame | SuBSENSE background subtraction (CPU + Vulkan GPU) | Apache-2.0; LITIV-derived |
 | **rtl_sdr** | — → signal | RTL-SDR I/Q source (data-source plugin — captured by session recording, driven by reinjection replay) | Apache-2.0 plugin code; links **librtlsdr (LGPL-2.1+)** at runtime |
+| **nesdr** | — → signal | NooElec NESDR I/Q source: same ports and parameters as `rtl_sdr`, but gates each hardware control on a per-model capability table, so a board without a Q-branch, a bias tee or an E4000 never gets told it has one. **Experimental — never run against a NESDR;** the table is built from published specs, use `rtl_sdr` for a tested path | Apache-2.0 plugin code; links **librtlsdr (LGPL-2.1+)** at runtime |
 | **kraken_sdr** | — → 5× signal | KrakenSDR 5-channel coherent RTL-SDR array source (data-source plugin; reuses the `rtl_sdr` device layer) | Apache-2.0 plugin code; links **librtlsdr (LGPL-2.1+)** at runtime |
 | **adsb_display** | table → frame | Interactive ADS-B map: slippy-map tiles, aircraft markers with type-specific silhouettes, airspace and airport layers, trails, tooltips and an aircraft list | **GPL-3.0** — the only copyleft plugin here; marker artwork derives from [tar1090](https://github.com/wiedehopf/tar1090) |
 
-> **Linux: `rtl_sdr` and `kraken_sdr` need librtlsdr installed separately.** It
+> **Linux: `rtl_sdr`, `nesdr` and `kraken_sdr` need librtlsdr installed separately.** It
 > is `dlopen`ed at runtime rather than linked, so it is in no Speculor archive
 > and the plugins load fine without it — they simply report no devices. Install
 > it with `sudo apt install librtlsdr0` (Debian/Ubuntu), `sudo dnf install
@@ -75,7 +76,7 @@ Apache-2.0 at all:
 
 - `vibe_bgs`, `subsense_bgs` — Apache-2.0, contain LITIV-derived code; **ViBe is
   patent-encumbered** in some jurisdictions.
-- `rtl_sdr`, `kraken_sdr` — Apache-2.0 plugin code linking **librtlsdr (LGPL-2.1+)** at runtime.
+- `rtl_sdr`, `nesdr`, `kraken_sdr` — Apache-2.0 plugin code linking **librtlsdr (LGPL-2.1+)** at runtime.
 - `adsb_display` — **GPL-3.0-or-later**, the only copyleft plugin in this repository.
   Its aircraft marker shapes are generated from [tar1090](https://github.com/wiedehopf/tar1090)
   (GPL-3.0), which cannot be relicensed, so the plugin is distributed under the same

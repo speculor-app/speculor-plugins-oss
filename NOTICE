@@ -14,8 +14,14 @@ obligations:
     Pierre-Luc St-Charles). The ViBe algorithm is additionally patent-encumbered
     in some jurisdictions. See THIRD_PARTY_NOTICES.md and plugins/vibe_bgs/LICENSE.
 
-  * plugins/rtl_sdr links librtlsdr (LGPL-2.1-or-later), loaded at runtime. See
-    THIRD_PARTY_NOTICES.md and plugins/rtl_sdr/LICENSE.
+  * plugins/rtl_sdr, plugins/nesdr and plugins/kraken_sdr link librtlsdr
+    (LGPL-2.1-or-later), loaded at runtime. See THIRD_PARTY_NOTICES.md and each
+    plugins/<name>/LICENSE.
+
+    "NooElec" and "NESDR" are trademarks of Nooelec Inc. plugins/nesdr is an
+    independent, unaffiliated implementation driving that hardware through the
+    public RTL-SDR API; it contains no NooElec code and is not endorsed by
+    Nooelec Inc.
 
   * plugins/adsb_display is licensed GPL-3.0-or-later, NOT Apache-2.0 — the only
     copyleft plugin in this repository. Its aircraft marker shapes

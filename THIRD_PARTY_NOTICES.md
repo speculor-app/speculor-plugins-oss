@@ -49,8 +49,9 @@ which a coherent array needs in order to stop the R820T2's sigma-delta modulator
 each tuner's phase independently. The Windows build shipped is the upstream
 `rtlsdr-bin-w64_static` release, which links libusb statically.
 
-The `rtl_sdr` and `kraken_sdr` plugins use the RTL-SDR API (the KrakenSDR is a
-five-channel RTL-SDR array). The library (`rtlsdr.dll` / `librtlsdr.so`)
+The `rtl_sdr`, `nesdr` and `kraken_sdr` plugins use the RTL-SDR API (the NooElec
+NESDR line is RTL2832U-based; the KrakenSDR is a five-channel RTL-SDR array).
+The library (`rtlsdr.dll` / `librtlsdr.so`)
 is **loaded at runtime** via `LoadLibrary`/`dlopen`; only the `rtl-sdr.h` header is
 used at compile time. Because the library is dynamically loaded rather than statically
 linked, the LGPL's relinking requirement is satisfied by the runtime-replaceable

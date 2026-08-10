@@ -41,6 +41,11 @@ plugins/
   vibe_bgs/        # ViBe BGS plugin (CPU + Vulkan GPU)
   subsense_bgs/    # SuBSENSE BGS plugin (CPU + Vulkan GPU)
   rtl_sdr/         # RTL-SDR I/Q source — data-source plugin (SPC_PLUGIN_DATA_SOURCE, needs SDK ≥ 0.20.0); links librtlsdr LGPL-2.1+ at runtime
+  nesdr/           # NooElec NESDR I/Q source; compiles rtl_sdr's device layer. Same ports/params/vtable as
+                   #   rtl_sdr, but gates each hardware control on a per-model capability table (nesdr_models.*).
+                   #   SPC_MATURITY_EXPERIMENTAL: never run against a NESDR — the table comes from NooElec's
+                   #   published specs, and the tests only prove the plugin gates what its own table claims.
+                   #   The assumptions are enumerated in its README; check them before trusting a profile
   kraken_sdr/      # KrakenSDR 5-channel coherent RTL-SDR array source (5 signal ports); compiles rtl_sdr's device layer; links librtlsdr LGPL-2.1+ at runtime
   cmake/           # FindRtlSdr.cmake (header locator) + RtlSdr.cmake (downloader)
 ```
@@ -67,7 +72,7 @@ include trees are disjoint, so there is no collision.
 
 ## Tests
 
-`-DSPECULOR_BUILD_TESTS=ON` builds `tests/`; run with `ctest --test-dir build --output-on-failure`. Ten tests run per platform in CI, and `Build (Linux)` / `Build (Windows)` are required checks.
+`-DSPECULOR_BUILD_TESTS=ON` builds `tests/`; run with `ctest --test-dir build --output-on-failure`. Thirteen tests run per platform in CI, and `Build (Linux)` / `Build (Windows)` are required checks.
 
 **The plugin list is explicit, and that is the trap.** `tests/CMakeLists.txt` holds a `_candidates` list filtered through `if(TARGET ...)` — the filter exists so a plugin held back by the release gate drops out instead of failing the configure, *not* to discover new plugins. Nothing warns you about a plugin you never added; it is simply never tested, which reads exactly like a plugin that passes. (`speculor-plugins` auto-discovers instead, because at ~140 plugins a hand-written list would be stale within a week.)
 
@@ -78,6 +83,7 @@ Four tiers, each registered per plugin so a failure names the plugin:
 | `conformance.<plugin>` | `conformance_runner.cpp` | every plugin — loadable, ABI-honest |
 | `behaviour.<plugin>` | `bgs_behaviour_runner.cpp` | BGS pair — image in, foreground mask out |
 | `nohardware.<plugin>` | `sdr_nohardware_runner.cpp` | SDR sources — no-device paths |
+| `models.<plugin>` | `nesdr_models_runner.cpp` | nesdr's per-model capability gating |
 | `display.<plugin>` | `adsb_display_runner.cpp` | waypoint round-trip, hostile inputs |
 
 Conformance is the floor, not the goal: it proves the plugin loads and answers the ABI honestly, never that it works. Pick the tier that matches the plugin's contract — and where no hardware exists in CI, the no-device paths are still worth asserting, since the librtlsdr heap corruption and the unbounded-stop bugs both lived there.

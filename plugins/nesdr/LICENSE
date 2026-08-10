@@ -1,0 +1,32 @@
+nesdr — license
+===============
+
+The plugin's own source (nesdr_plugin.cpp, nesdr_models.{h,cpp}) is licensed
+under the Apache License, Version 2.0. The full license text is in the
+repository root `LICENSE`.
+
+This plugin also compiles `plugins/rtl_sdr/rtl_sdr_device.{h,cpp}` from this
+repository, which is under the same terms.
+
+Linked third-party library
+--------------------------
+
+This plugin uses the RTL-SDR API and loads `librtlsdr` at runtime:
+
+    librtlsdr — https://github.com/librtlsdr/librtlsdr
+    GNU Lesser General Public License, version 2.1 or later (LGPL-2.1-or-later).
+
+Only the `rtl-sdr.h` header is used at compile time; the library
+(`rtlsdr.dll` / `librtlsdr.so`) is loaded dynamically via `LoadLibrary`/`dlopen`,
+so it remains user-replaceable. Redistributing this plugin alongside that library
+carries the LGPL attribution and source-availability obligations for librtlsdr.
+See the repository-root `THIRD_PARTY_NOTICES.md`.
+
+Trademark note
+--------------
+
+"NooElec" and "NESDR" are trademarks of Nooelec Inc. This plugin is an
+independent, unaffiliated implementation that drives NESDR hardware through the
+same public RTL-SDR API any other application uses; it contains no NooElec code
+and is not endorsed by Nooelec Inc. The model names are used solely to identify
+which hardware a capability profile describes.
