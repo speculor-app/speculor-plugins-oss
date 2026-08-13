@@ -184,6 +184,15 @@ static const SpcPluginDescriptor* scan_devices(const SpcHostServices* svc)
 
     if (!spc::rtlsdr::RtlSdrDevice::is_api_loaded()) {
         SPC_LOG_WARN(&log, "RTL-SDR: rtlsdr library not found");
+    } else if (g_registry.count <= 1) {
+#ifdef _WIN32
+        SPC_LOG_WARN(&log, "RTL-SDR: no devices found — check the dongle is "
+                           "plugged in and visible in Device Manager.");
+#else
+        SPC_LOG_WARN(&log, "RTL-SDR: no devices found — check the dongle is "
+                           "plugged in ('lsusb' should list it, typically "
+                           "ID 0bda:2838).");
+#endif
     } else {
         SPC_LOG_INFO(&log, "RTL-SDR: found %d device(s)", g_registry.count - 1);
         for (int i = 1; i < g_registry.count; ++i)

@@ -68,24 +68,21 @@ bool RtlSdrDevice::load_api(SpcLogContext* log)
     if (!dll_handle_) {
         // librtlsdr is dlopen'd, not linked, so it is invisible to the
         // packaging: on POSIX it comes from the distro, and nothing in the
-        // archive hints at that. Say so once, with the command to fix it —
-        // otherwise the only symptom is an empty device list.
-        static bool warned = false;
-        if (!warned) {
-            warned = true;
+        // archive hints at that. Warn on every failed load — each attempt is
+        // user-initiated (scan click or pipeline start), and the device-scan
+        // UI surfaces these lines, so a repeat scan must re-emit the fix.
 #ifdef _WIN32
-            SPC_LOG_WARN(log, "RTL-SDR: rtlsdr.dll not found. It ships in this "
-                              "plugin's vendor/ folder — re-extract the bundle "
-                              "if it is missing.");
+        SPC_LOG_WARN(log, "RTL-SDR: rtlsdr.dll not found. It ships in this "
+                          "plugin's vendor/ folder — re-extract the bundle "
+                          "if it is missing.");
 #else
-            SPC_LOG_WARN(log, "RTL-SDR: librtlsdr not found (tried librtlsdr.so.0 "
-                              "and librtlsdr.so). Install it, then restart: "
-                              "Debian/Ubuntu 'sudo apt install librtlsdr0', "
-                              "Fedora 'sudo dnf install rtl-sdr', "
-                              "Arch 'sudo pacman -S rtl-sdr'. RTL-SDR and "
-                              "KrakenSDR list no devices until then.");
+        SPC_LOG_WARN(log, "RTL-SDR: librtlsdr not found (tried librtlsdr.so.0 "
+                          "and librtlsdr.so). Install it, then restart: "
+                          "Debian/Ubuntu 'sudo apt install rtl-sdr', "
+                          "Fedora 'sudo dnf install rtl-sdr', "
+                          "Arch 'sudo pacman -S rtl-sdr'. RTL-SDR and "
+                          "KrakenSDR list no devices until then.");
 #endif
-        }
         return false;
     }
 
