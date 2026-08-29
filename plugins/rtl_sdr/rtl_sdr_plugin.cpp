@@ -3,6 +3,7 @@
 #include <speculor/sdr_params.h>
 #include <spc_clock.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <memory>
@@ -12,22 +13,25 @@
 
 static struct RtlSdrRegistry {
     spc::sdr::DeviceEntry devices[spc::sdr::MAX_DEVICES];
+    char ids[spc::sdr::MAX_DEVICES][SPC_PARAM_ENUM_ID_MAX]; // persistence keys
     uint32_t device_indices[spc::sdr::MAX_DEVICES]; // map enum index to hw index
     int count = 0;
 
-    // gain table populated per-device after open
-    int gains[64];
-    int gain_count = 0;
+    // set when two dongles report the same serial, which leaves the
+    // enumeration index as the only thing telling them apart
+    bool ambiguous_serials = false;
 
     bool initialized = false;
 
     void scan(SpcLogContext* log = nullptr)
     {
         count = 0;
+        ambiguous_serials = false;
 
         // first entry = "None"
         devices[count].index = -1;
         std::strncpy(devices[count].label, "None", SPC_PARAM_ENUM_LABEL_MAX);
+        ids[count][0] = '\0';
         device_indices[count] = UINT32_MAX;
         count++;
 
@@ -39,9 +43,34 @@ static struct RtlSdrRegistry {
         auto hw = spc::rtlsdr::RtlSdrDevice::enumerate();
         for (const auto& dev : hw) {
             if (count >= spc::sdr::MAX_DEVICES) break;
+
+            // Generic dongles all ship with the factory-default serial
+            // 00000001, so two of them label identically — unreadable in the
+            // combo box, and worse, indistinguishable to the project loader,
+            // which resolves a saved option by label and would point both
+            // nodes at one radio. Fall back to the enumeration index, the same
+            // -d the rtl_test / rtl_eeprom tools take.
+            const bool clash = std::count_if(hw.begin(), hw.end(), [&](const auto& o) {
+                return std::strcmp(o.serial, dev.serial) == 0 &&
+                       std::strcmp(o.name, dev.name) == 0;
+            }) > 1;
+            if (clash) ambiguous_serials = true;
+
             devices[count].index = static_cast<int>(dev.index);
-            std::snprintf(devices[count].label, SPC_PARAM_ENUM_LABEL_MAX,
-                          "%s [%s]", dev.name, dev.serial);
+            if (clash)
+                std::snprintf(devices[count].label, SPC_PARAM_ENUM_LABEL_MAX,
+                              "#%u %s", dev.index, dev.name);
+            else
+                std::snprintf(devices[count].label, SPC_PARAM_ENUM_LABEL_MAX,
+                              "%s [%s]", dev.name, dev.serial);
+
+            // Persistence key, preferred over the label by the project loader.
+            // The serial alone will not do for the reason above; pairing it
+            // with the index makes it unique for as long as the dongles stay
+            // in the ports they were scanned in.
+            std::snprintf(ids[count], SPC_PARAM_ENUM_ID_MAX, "%s@%u",
+                          dev.serial, dev.index);
+
             device_indices[count] = dev.index;
             count++;
         }
@@ -86,6 +115,12 @@ struct RtlSdrState {
     int32_t if_gain_stage = 0;   // enum: stage 1-6
     int32_t if_gain = 0;         // tenths of dB
 
+    // tuner gain steps, queried from this instance's device at open. Per
+    // instance and not shared: two nodes driving two dongles can be on
+    // different tuners (an R820T2 and an R828D snap to different steps).
+    int gains[64];
+    int gain_count = 0;
+
     // cached
     double actual_sample_rate = 2048000.0;
 
@@ -114,28 +149,30 @@ static void patch_device_enum()
                 std::strncpy(ev.labels[j], g_registry.devices[j].label,
                              SPC_PARAM_ENUM_LABEL_MAX - 1);
                 ev.labels[j][SPC_PARAM_ENUM_LABEL_MAX - 1] = '\0';
+                std::strncpy(ev.ids[j], g_registry.ids[j], SPC_PARAM_ENUM_ID_MAX - 1);
+                ev.ids[j][SPC_PARAM_ENUM_ID_MAX - 1] = '\0';
             }
         }
     }
 }
 
 // Snap a requested dB gain to the nearest hardware-supported step and apply it.
-// The tuner only supports a discrete set of gains (queried into g_registry.gains
-// at open); we keep the user-facing value a device-independent dB float so it
+// The tuner only supports a discrete set of gains (queried into s->gains at
+// open); we keep the user-facing value a device-independent dB float so it
 // persists cleanly, and snap here when applying.
-static void apply_manual_gain(spc::rtlsdr::RtlSdrDevice* dev, float gain_db, [[maybe_unused]] SpcLogContext* log)
+static void apply_manual_gain(RtlSdrState* s, float gain_db)
 {
     int target = static_cast<int>(gain_db * 10.0f + (gain_db >= 0.0f ? 0.5f : -0.5f)); // tenths dB
-    if (g_registry.gain_count > 0) {
-        int best = g_registry.gains[0];
+    if (s->gain_count > 0) {
+        int best = s->gains[0];
         int best_d = target - best; if (best_d < 0) best_d = -best_d;
-        for (int i = 1; i < g_registry.gain_count; ++i) {
-            int d = target - g_registry.gains[i]; if (d < 0) d = -d;
-            if (d < best_d) { best_d = d; best = g_registry.gains[i]; }
+        for (int i = 1; i < s->gain_count; ++i) {
+            int d = target - s->gains[i]; if (d < 0) d = -d;
+            if (d < best_d) { best_d = d; best = s->gains[i]; }
         }
         target = best;
     }
-    dev->set_tuner_gain(target);
+    s->device->set_tuner_gain(target);
 }
 
 // Apply the AGC/manual gain configuration. When enabling AGC, the tuner's
@@ -152,13 +189,13 @@ static void apply_gain_config(RtlSdrState* s)
     if (!dev) return;
     if (s->agc_enabled) {
         dev->set_tuner_gain_mode(true);
-        apply_manual_gain(dev, s->gain_db, &s->host.cached_log);
+        apply_manual_gain(s, s->gain_db);
         dev->set_tuner_gain_mode(false);   // auto, keeping the seeded codes
         dev->set_agc(true);
     } else {
         dev->set_agc(false);
         dev->set_tuner_gain_mode(true);
-        apply_manual_gain(dev, s->gain_db, &s->host.cached_log);
+        apply_manual_gain(s, s->gain_db);
     }
 }
 
@@ -197,6 +234,14 @@ static const SpcPluginDescriptor* scan_devices(const SpcHostServices* svc)
         SPC_LOG_INFO(&log, "RTL-SDR: found %d device(s)", g_registry.count - 1);
         for (int i = 1; i < g_registry.count; ++i)
             SPC_LOG_INFO(&log, "RTL-SDR:   [%d] %s", i, g_registry.devices[i].label);
+
+        if (g_registry.ambiguous_serials)
+            SPC_LOG_WARN(&log, "RTL-SDR: two or more dongles report the same serial "
+                               "number, so the only thing telling them apart is the "
+                               "#N enumeration index now shown in the device list — "
+                               "and that index follows the USB port, so it moves if "
+                               "they are replugged. Flash a unique serial to each "
+                               "instead: 'rtl_eeprom -d 1 -s 00000002', then replug.");
     }
 
     return &g_desc;
@@ -325,7 +370,7 @@ static int set_parameter(SpcPluginInstance* inst, const char* name,
         return 0;
     }
     if (spc::try_set_float(name, value, SPC_SDR_GAIN, s->gain_db)) {
-        if (live && !s->agc_enabled) apply_manual_gain(dev, s->gain_db, &s->host.cached_log);
+        if (live && !s->agc_enabled) apply_manual_gain(s, s->gain_db);
         else SPC_LOG_INFO(&s->host.cached_log, "RTL-SDR: gain %.1f dB stored, not applied (live=%d agc=%d)",
                           static_cast<double>(s->gain_db), static_cast<int>(live), static_cast<int>(s->agc_enabled));
         return 0;
@@ -456,6 +501,15 @@ static int start(SpcPluginInstance* inst)
         return 0;
     }
 
+    // A project restores its saved device by appending the option it recorded
+    // when nothing in the current scan matches, so the index can point past
+    // everything this registry knows — there is no hardware index behind it.
+    if (s->device_idx >= g_registry.count) {
+        SPC_LOG_ERROR(&s->host.cached_log,
+                      "RTL-SDR: the saved device is not connected — rescan and select one");
+        return -1;
+    }
+
     if (!spc::rtlsdr::RtlSdrDevice::is_api_loaded()) {
         SPC_LOG_ERROR(&s->host.cached_log, "rtlsdr library not available");
         return -1;
@@ -469,7 +523,7 @@ static int start(SpcPluginInstance* inst)
     }
 
     // query the device's supported gain steps (used to snap the dB gain)
-    g_registry.gain_count = s->device->query_tuner_gains(g_registry.gains, 64);
+    s->gain_count = s->device->query_tuner_gains(s->gains, 64);
 
     // apply all parameters
     uint32_t rate = static_cast<uint32_t>(s->sample_rate);
