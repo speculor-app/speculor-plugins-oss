@@ -16,7 +16,6 @@ using spc::map::MAP_STYLE_STANDARD;
 using spc::map::MAP_STYLE_HUMANITARIAN;
 using spc::map::MAP_STYLE_DARK;
 using spc::map::MAP_STYLE_LIGHT;
-using spc::map::MAP_STYLE_VOYAGER;
 using spc::map::MAP_STYLE_TOPO;
 using spc::map::MAP_STYLE_CUSTOM;
 using spc::map::MAP_STYLE_COUNT;
