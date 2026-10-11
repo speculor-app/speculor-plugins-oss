@@ -104,7 +104,7 @@ SPC_PLUGIN_DESCRIPTOR(
         .int_param("height", "Height", 240, 2160, 800, 10, "View")
             .param_description("Output frame height in pixels")
         .enum_param("map_style", "Map Style",
-                    {"Standard", "Humanitarian", "Dark", "Light", "Voyager", "Topo", "Custom"},
+                    {"Standard", "Humanitarian", "Dark", "Light", "Topo", "Custom"},
                     2, "Tiles")
             .param_description("Map tile source and visual style")
         .string_param("custom_server", "Custom Server", "tile.openstreetmap.org", "Tiles")
