@@ -538,6 +538,7 @@ static int start(SpcPluginInstance* inst)
 
     auto* server = resolve_tile_server(p.map_style, p.custom_server);
     s->tile_cache.set_server(server);
+    s->tile_cache.set_style(p.map_style);
     s->applied_map_style = p.map_style;
     std::strncpy(s->applied_custom_server, p.custom_server, sizeof(s->applied_custom_server) - 1);
     s->applied_custom_server[sizeof(s->applied_custom_server) - 1] = '\0';
@@ -777,6 +778,7 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs,
             auto* server = resolve_tile_server(s->cur.map_style, s->cur.custom_server);
             s->download_queue.update_server(server);
             s->tile_cache.set_server(server);
+            s->tile_cache.set_style(s->cur.map_style);
             s->tile_cache.clear();
             s->applied_map_style = s->cur.map_style;
             std::strncpy(s->applied_custom_server, s->cur.custom_server, sizeof(s->applied_custom_server) - 1);

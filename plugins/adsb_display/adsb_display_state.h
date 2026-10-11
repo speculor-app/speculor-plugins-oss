@@ -71,6 +71,7 @@ struct TileCache
     std::unordered_map<TileKey, cv::Mat, TileKeyHash> mem_cache;
     std::string base_cache_dir;
     std::string server_name;
+    bool dark = false;  // the disk keeps the tile as served; memory holds it recoloured
     static constexpr size_t k_max_mem_tiles = 256;
 
     // Bumped on every mutation (put, evict, clear) so the background
@@ -91,6 +92,13 @@ struct TileCache
             if (c == '/' || c == ':' || c == '\\') c = '_';
     }
 
+    void set_style(int32_t style)
+    {
+        if (spc::map::is_dark_map(style) == dark) return;
+        dark = spc::map::is_dark_map(style);
+        clear();
+    }
+
     const cv::Mat* get(const TileKey& key)
     {
         auto it = mem_cache.find(key);
@@ -102,6 +110,7 @@ struct TileCache
             auto img = cv::imread(path, cv::IMREAD_COLOR);
             if (!img.empty()) {
                 cv::cvtColor(img, img, cv::COLOR_BGR2RGB);  // canvas uses RGB convention
+                if (dark) spc::map::darken_tile(img);
                 evict_if_full();
                 auto [ins, _] = mem_cache.emplace(key, std::move(img));
                 version.fetch_add(1, std::memory_order_relaxed);
@@ -116,7 +125,10 @@ struct TileCache
         auto path = tile_path(key);
         auto dir = std::filesystem::path(path).parent_path();
         std::filesystem::create_directories(dir);
-        cv::imwrite(path, tile);
+        cv::Mat bgr;
+        cv::cvtColor(tile, bgr, cv::COLOR_RGB2BGR);
+        cv::imwrite(path, bgr);
+        if (dark) spc::map::darken_tile(tile);
 
         evict_if_full();
         mem_cache[key] = std::move(tile);
@@ -125,7 +137,8 @@ struct TileCache
 
     std::string tile_path(const TileKey& key) const
     {
-        return std::format("{}/{}/{}/{}/{}.png",
+        // v2: the first layout wrote the RGB canvas tile as BGR, so its files hold red and blue swapped.
+        return std::format("{}/v2/{}/{}/{}/{}.png",
                           base_cache_dir, server_name, key.z, key.x, key.y);
     }
 
