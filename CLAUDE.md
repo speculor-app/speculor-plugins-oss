@@ -81,7 +81,7 @@ Four tiers, each registered per plugin so a failure names the plugin:
 | Tier | Runner | Covers |
 |---|---|---|
 | `conformance.<plugin>` | `conformance_runner.cpp` | every plugin — loadable, ABI-honest |
-| `behaviour.<plugin>` | `bgs_behaviour_runner.cpp` | BGS pair — image in, foreground mask out |
+| `behaviour.<plugin>` | `bgs_behaviour_runner.cpp` | BGS pair — image in, foreground mask out; with the pool dry, no write into a frame already handed on |
 | `nohardware.<plugin>` | `sdr_nohardware_runner.cpp` | SDR sources — no-device paths |
 | `models.<plugin>` | `nesdr_models_runner.cpp` | nesdr's per-model capability gating |
 | `display.<plugin>` | `adsb_display_runner.cpp` | waypoint round-trip, hostile inputs |

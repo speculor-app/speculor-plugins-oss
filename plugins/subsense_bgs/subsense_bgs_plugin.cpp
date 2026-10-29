@@ -365,8 +365,10 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t inpu
     SpcFrame* out = s->host.acquire_frame(0, w, h, SPC_PIXEL_FORMAT_GRAY8);
     if (out)
     {
-        s->fg_mask = cv::Mat(static_cast<int>(h), static_cast<int>(w), CV_8UC1, out->data);
-        s->subsense->apply(s->input_image, s->fg_mask,
+        // A view local to this call: the frame is the engine's once it is on
+        // the output, and the fallback below writes into s->fg_mask.
+        cv::Mat fg_mask(static_cast<int>(h), static_cast<int>(w), CV_8UC1, out->data);
+        s->subsense->apply(s->input_image, fg_mask,
                            use_mask ? s->cached_mask : s->empty_mask);
         out->frame_number = in_frame->frame_number;
         out->timestamp_ns = in_frame->timestamp_ns;
