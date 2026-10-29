@@ -1,7 +1,8 @@
 // Behavioural checks for the background-subtraction plugins: feed synthetic
 // frames through the C ABI and assert what the algorithm is supposed to do —
 // a settled scene reports almost no foreground, and an object appearing in it
-// is reported where it actually is.
+// is reported where it actually is. With the host's pool dry, the mask must
+// not land in a frame already handed on.
 //
 // Assertions are invariants, not exact pixels. ViBe replaces a randomly chosen
 // background sample per update by design, so two runs over identical input do
@@ -167,6 +168,28 @@ int main(int argc, char** argv) {
     const size_t absorbed = mask ? count_nonzero_in(mask, bx, by, bsz) : 0;
     std::printf("    foreground in blob after 120 static frames: %zu px\n", absorbed);
     check(absorbed <= in_blob, "stationary object: foreground does not grow over time");
+
+    // --- the pool runs dry --------------------------------------------------
+    // The mask went into a host frame and was handed on. When the next
+    // acquire_frame fails the plugin falls back to a mask of its own, and that
+    // must not be the frame handed on: it is downstream by then, or back in the
+    // pool and being written by another chain. Fill it the way its next owner
+    // would, then make every acquire_frame fail.
+    check(mask != nullptr && mask->pool_id != 0, "frames available: the mask is a host frame");
+    if (mask && mask->pool_id != 0) {
+        auto* handed_on = const_cast<SpcFrame*>(mask);
+        const size_t bytes = static_cast<size_t>(handed_on->stride) * handed_on->height;
+        std::memset(handed_on->data, 0x5A, bytes);
+        host.disable_frames();
+
+        const SpcFrame* fallback = run_frame(plugin, host, scene, 400);
+        check(fallback != nullptr, "pool dry: the plugin still emits a mask");
+        check(fallback == nullptr || fallback->data != handed_on->data,
+              "pool dry: the mask is not the frame handed on");
+        bool untouched = true;
+        for (size_t i = 0; i < bytes && untouched; ++i) untouched = handed_on->data[i] == 0x5A;
+        check(untouched, "pool dry: the frame handed on is left alone");
+    }
 
     // --- shutdown -----------------------------------------------------------
     check(plugin.stop() == 0, "stop() returns success");
