@@ -2,6 +2,7 @@
 
 #ifdef SPC_HAS_VULKAN
 
+#include <speculor/plugin_api.h>
 #include <gpu/vulkan_context.h>
 #include <gpu/gpu_utils.h>
 #include <gpu/gpu_pipeline_base.h>
@@ -39,8 +40,11 @@ public:
     bool init(VulkanContext& ctx);
 
     // prepare buffers for given frame dimensions (re-allocates if size changed)
+    // From record_gpu pass the host services and SpcGpuRecordCtx::edge_ring_ctx:
+    // what a resize replaces is then freed once no frame in flight uses it.
     bool prepare(VulkanContext& ctx, uint32_t width, uint32_t height,
-                 int num_channels, int bytes_per_channel, int bg_samples);
+                 int num_channels, int bytes_per_channel, int bg_samples,
+                 const SpcHostServices* host = nullptr, void* edge_ring_ctx = nullptr);
 
     // Engine-driven coalesced first-frame init. Records the init upload +
     // init dispatch into the supplied secondary so the read of the input is
@@ -78,7 +82,11 @@ public:
                 VkBuffer out_device,
                 const uint8_t* detect_mask, uint32_t mask_size,
                 const VibePushConstants& params,
-                VkBuffer gpu_input = VK_NULL_HANDLE);
+                VkBuffer gpu_input = VK_NULL_HANDLE,
+                const SpcGpuEdgeBuffer* mask_upload = nullptr);
+    // A CPU detect_mask is copied into `mask_upload` when given (the engine's
+    // per-frame staging, acquire_ringed_scratch), so a changed mask cannot
+    // overwrite the one an earlier frame in flight still uploads from.
 
     // Byte sizes the plugin passes to the host's edge-ring acquire calls.
     VkDeviceSize input_device_size() const { return frame_byte_size_; }
@@ -150,6 +158,7 @@ private:
     // staging buffer for the optional detect_mask (host-visible, mapped). The
     // input upload staging is now engine-owned (the upload ring slot).
     StagingBuffer staging_mask_;
+    StagingBuffer mask_src_{};  // this frame's mask staging (a view; see record)
 
     // cached dimensions and layout
     uint32_t width_ = 0;

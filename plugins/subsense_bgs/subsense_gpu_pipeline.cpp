@@ -1,6 +1,7 @@
 #ifdef SPC_HAS_VULKAN
 
 #include "subsense_gpu_pipeline.h"
+#include "gpu/frame_release.h"
 
 // embedded SPIR-V bytecode (generated at build time)
 #include "subsense_init_comp.spv.h"
@@ -76,7 +77,8 @@ bool SubsenseGpuPipeline::init(VulkanContext& ctx)
 }
 
 bool SubsenseGpuPipeline::prepare(VulkanContext& ctx, uint32_t width, uint32_t height,
-                                   int num_channels, int bg_samples)
+                                   int num_channels, int bg_samples,
+                                   const SpcHostServices* host, void* edge_ring_ctx)
 {
     if (width == width_ && height == height_ &&
         num_channels == num_channels_ && bg_samples == bg_samples_)
@@ -86,10 +88,10 @@ bool SubsenseGpuPipeline::prepare(VulkanContext& ctx, uint32_t width, uint32_t h
     wait_timeline_idle(ctx);
 
     // free old buffers (input upload + output are engine-owned ring slots now)
-    staging_mask_.destroy(ctx);
+    spc::gpu::free_after_frames(ctx, host, edge_ring_ctx, staging_mask_);
     for (int i = 0; i < NUM_BUFFERS; ++i)
-        spc::gpu::destroy_buffer(ctx, bufs_[i], mems_[i]);
-    spc::gpu::destroy_buffer(ctx, packed_mask_buf_, packed_mask_mem_);
+        spc::gpu::free_after_frames(ctx, host, edge_ring_ctx, bufs_[i], mems_[i]);
+    spc::gpu::free_after_frames(ctx, host, edge_ring_ctx, packed_mask_buf_, packed_mask_mem_);
 
     width_ = width;
     height_ = height;
@@ -261,7 +263,8 @@ bool SubsenseGpuPipeline::record(VulkanContext& ctx, VkCommandBuffer cmd,
                                   VkBuffer out_device,
                                   const uint8_t* detect_mask, int mask_stride,
                                   const SubsensePushConstants& params,
-                                  VkBuffer gpu_input)
+                                  VkBuffer gpu_input,
+                                  const SpcGpuEdgeBuffer* mask_upload)
 {
     if (!ctx.valid || !model_initialized_) return false;
     if (out_device == VK_NULL_HANDLE) return false;
@@ -272,8 +275,18 @@ bool SubsenseGpuPipeline::record(VulkanContext& ctx, VkCommandBuffer cmd,
     // Only refresh the persistent mask device buffer when it actually changed
     // (the shader still applies it every frame via params.has_mask).
     const bool do_upload = (detect_mask != nullptr && params.has_mask != 0) && mask_upload_needed_;
+    // this frame's mask staging: the engine's per-frame buffer when given, else
+    // the pipeline's own. A view, never destroyed through it.
+    {
+        const bool ringed = mask_upload && mask_upload->staging_buffer &&
+                            mask_upload->staging_mapped && mask_upload->staging_size >= mask_bytes_;
+        mask_src_ = StagingBuffer{};
+        mask_src_.buffer = ringed ? static_cast<VkBuffer>(mask_upload->staging_buffer) : staging_mask_.buffer;
+        mask_src_.mapped = ringed ? mask_upload->staging_mapped : staging_mask_.mapped;
+        mask_src_.size = ringed ? mask_upload->staging_size : staging_mask_.size;
+    }
     if (do_upload) {
-        auto* mask_staging = static_cast<uint8_t*>(staging_mask_.mapped);
+        auto* mask_staging = static_cast<uint8_t*>(mask_src_.mapped);
         if (mask_stride == static_cast<int>(width_)) {
             std::memcpy(mask_staging, detect_mask, static_cast<size_t>(width_) * height_);
         } else {
@@ -296,7 +309,7 @@ bool SubsenseGpuPipeline::record(VulkanContext& ctx, VkCommandBuffer cmd,
         cmd_upload_input(in_stg, in_device, frame_bytes_);
     }
     if (do_upload) {
-        cmd_upload_input(staging_mask_, bufs_[3], mask_bytes_);
+        cmd_upload_input(mask_src_, bufs_[3], mask_bytes_);
         mask_upload_needed_ = false;
     }
     barrier_transfer_to_compute();
