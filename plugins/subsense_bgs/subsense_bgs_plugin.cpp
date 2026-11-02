@@ -468,7 +468,8 @@ static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
     default:                     num_channels = 1; break;
     }
 
-    if (!s->gpu_pipeline->prepare(*s->gpu_ctx, w, h, num_channels, p.bg_samples))
+    if (!s->gpu_pipeline->prepare(*s->gpu_ctx, w, h, num_channels, p.bg_samples,
+                                  s->host.svc, rctx->edge_ring_ctx))
         return -1;
 
     bool input_on_gpu = in_frame->gpu_handle != 0 &&
@@ -553,11 +554,15 @@ static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
         mask_stride = static_cast<int>(s->cached_mask.step[0]);
     }
 
+    SpcGpuEdgeBuffer mask_up{};
+    if (mask_ptr)
+        mask_up = s->host.acquire_ringed_scratch(rctx->edge_ring_ctx, 0, SPC_GPU_SCRATCH_UPLOAD,
+                                                 static_cast<uint64_t>(s->gpu_pipeline->packed_mask_bytes()));
     if (!s->gpu_pipeline->record(*s->gpu_ctx, cmd,
                                   in_device, in_staging,
                                   static_cast<VkBuffer>(outbuf.device_buffer),
                                   mask_ptr, mask_stride,
-                                  pc, gpu_input_buf)) {
+                                  pc, gpu_input_buf, &mask_up)) {
         s->host.release_frame(out);
         return -1;
     }

@@ -1,6 +1,7 @@
 #ifdef SPC_HAS_VULKAN
 
 #include "vibe_gpu_pipeline.h"
+#include "gpu/frame_release.h"
 
 // embedded SPIR-V bytecode (generated at build time)
 #include "vibe_init_comp.spv.h"
@@ -80,7 +81,8 @@ bool VibeGpuPipeline::init(VulkanContext& ctx)
 }
 
 bool VibeGpuPipeline::prepare(VulkanContext& ctx, uint32_t width, uint32_t height,
-                               int num_channels, int bytes_per_channel, int bg_samples)
+                               int num_channels, int bytes_per_channel, int bg_samples,
+                               const SpcHostServices* host, void* edge_ring_ctx)
 {
     if (width == width_ && height == height_ &&
         num_channels == num_channels_ && bytes_per_channel == bytes_per_channel_ &&
@@ -91,10 +93,10 @@ bool VibeGpuPipeline::prepare(VulkanContext& ctx, uint32_t width, uint32_t heigh
     wait_timeline_idle(ctx);
 
     // free old buffers (input upload + output are engine-owned now)
-    spc::gpu::destroy_buffer(ctx, bg_model_buf_, bg_model_mem_);
-    spc::gpu::destroy_buffer(ctx, detect_mask_buf_, detect_mask_mem_);
-    spc::gpu::destroy_buffer(ctx, packed_mask_buf_, packed_mask_mem_);
-    staging_mask_.destroy(ctx);
+    spc::gpu::free_after_frames(ctx, host, edge_ring_ctx, bg_model_buf_, bg_model_mem_);
+    spc::gpu::free_after_frames(ctx, host, edge_ring_ctx, detect_mask_buf_, detect_mask_mem_);
+    spc::gpu::free_after_frames(ctx, host, edge_ring_ctx, packed_mask_buf_, packed_mask_mem_);
+    spc::gpu::free_after_frames(ctx, host, edge_ring_ctx, staging_mask_);
 
     width_ = width;
     height_ = height;
@@ -276,7 +278,8 @@ bool VibeGpuPipeline::record(VulkanContext& ctx, VkCommandBuffer cmd,
                               VkBuffer out_device,
                               const uint8_t* detect_mask, uint32_t mask_size,
                               const VibePushConstants& params,
-                              VkBuffer gpu_input)
+                              VkBuffer gpu_input,
+                              const SpcGpuEdgeBuffer* mask_upload)
 {
     if (!ctx.valid || !model_initialized_) return false;
     if (out_device == VK_NULL_HANDLE) return false;
@@ -292,8 +295,18 @@ bool VibeGpuPipeline::record(VulkanContext& ctx, VkCommandBuffer cmd,
     // mark_mask_dirty / a resolution change), not every frame.
     const bool has_mask = (detect_mask != nullptr && mask_size > 0);
     const bool upload_mask = has_mask && mask_upload_needed_;
+    // this frame's mask staging: the engine's per-frame buffer when given, else
+    // the pipeline's own. A view, never destroyed through it.
+    {
+        const bool ringed = mask_upload && mask_upload->staging_buffer &&
+                            mask_upload->staging_mapped && mask_upload->staging_size >= mask_size;
+        mask_src_ = StagingBuffer{};
+        mask_src_.buffer = ringed ? static_cast<VkBuffer>(mask_upload->staging_buffer) : staging_mask_.buffer;
+        mask_src_.mapped = ringed ? mask_upload->staging_mapped : staging_mask_.mapped;
+        mask_src_.size = ringed ? mask_upload->staging_size : staging_mask_.size;
+    }
     if (upload_mask)
-        std::memcpy(staging_mask_.mapped, detect_mask, mask_size);
+        std::memcpy(mask_src_.mapped, detect_mask, mask_size);
 
     // Re-point bindings 0 (input ring slot) and 2 (output ring slot) at this
     // frame's buffers. At depth==1 these are the single slots, so this rewires
@@ -313,7 +326,7 @@ bool VibeGpuPipeline::record(VulkanContext& ctx, VkCommandBuffer cmd,
         recorded_transfer = true;
     }
     if (upload_mask) {
-        cmd_upload_input(staging_mask_, detect_mask_buf_, mask_size);
+        cmd_upload_input(mask_src_, detect_mask_buf_, mask_size);
         recorded_transfer = true;
         mask_upload_needed_ = false;
     }
