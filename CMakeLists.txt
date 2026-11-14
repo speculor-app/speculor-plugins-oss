@@ -69,8 +69,12 @@ else()
     else()
         set(_SPC_ARCH_FLAGS "-march=native -mtune=native")
     endif()
-    set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG ${_SPC_ARCH_FLAGS}")
-    set(CMAKE_C_FLAGS_RELEASE   "-O3 -DNDEBUG ${_SPC_ARCH_FLAGS}")
+    # -fno-math-errno: nothing here reads errno after a math call, but with
+    # it on gcc calls libm for every sqrt in case the argument is negative,
+    # which also keeps the loop from vectorizing. clang-cl's /fp:fast already
+    # implies it. Results do not change.
+    set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG -fno-math-errno ${_SPC_ARCH_FLAGS}")
+    set(CMAKE_C_FLAGS_RELEASE   "-O3 -DNDEBUG -fno-math-errno ${_SPC_ARCH_FLAGS}")
     if(SPECULOR_WITH_PDB)
         # -g1 emits enough DWARF for crash_guard backtraces without inlining
         # details, keeping binary bloat modest.
