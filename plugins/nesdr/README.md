@@ -33,7 +33,7 @@ model's board actually provides.
 | **Maturity** | `SPC_MATURITY_EXPERIMENTAL` — untested against hardware |
 | **Output** | `iq_out` — `SPC_DATA_SIGNAL`, fields `i`/`q` (`INT16`) |
 | **Inputs** | none; the implicit control input is port 0 |
-| **Flags** | `data_source`, `streaming`, `device_scan` |
+| **Flags** | `data_source`, `streaming` |
 | **Runtime dep** | `librtlsdr`, loaded via `LoadLibrary`/`dlopen` |
 
 ## Why this exists alongside `rtl_sdr`

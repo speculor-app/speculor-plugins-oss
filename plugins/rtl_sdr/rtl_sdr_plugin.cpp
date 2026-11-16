@@ -241,7 +241,7 @@ static const SpcPluginDescriptor* get_descriptor()
                 {"q", SPC_FIELD_INT16},
             })
             // Device
-            .enum_param("device", "Device", {"(no devices found)"}, 0, SPC_SDR_GROUP_DEVICE)
+            .enum_param("device", "Device", {"(no devices found)"}, 0, SPC_SDR_GROUP_DEVICE).listed()
                 .param_description("Connected RTL-SDR receiver to use")
                 .mandatory()
             // Tuning
@@ -280,7 +280,6 @@ static const SpcPluginDescriptor* get_descriptor()
                 .param_description("Output 8-bit counter instead of samples (debug)")
             .int_param("if_gain", "IF Gain (0.1 dB)", -30, 90, 0, 10, SPC_SDR_GROUP_HARDWARE)
                 .param_description("Intermediate frequency gain in tenths of dB (E4000 tuner only)")
-            .device_scan()
             .build_into(g_desc);
 
         scan_devices(nullptr);
