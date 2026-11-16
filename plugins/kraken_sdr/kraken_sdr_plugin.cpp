@@ -257,7 +257,6 @@ static const SpcPluginDescriptor* get_descriptor()
             .bool_param("relax_serial_match", "Relax Serial Match", false, SPC_SDR_GROUP_HARDWARE)
                 .param_description("If serials 1000-1004 aren't found, use the first 5 RTL devices "
                                    "(reflashed units; reference channel not guaranteed)")
-            .device_scan()
             .build_into(g_desc);
 
         scan_devices(nullptr);

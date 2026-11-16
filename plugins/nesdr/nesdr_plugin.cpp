@@ -263,7 +263,7 @@ static const SpcPluginDescriptor* get_descriptor()
                 {"q", SPC_FIELD_INT16},
             })
             // Device
-            .enum_param("device", "Device", {"(no devices found)"}, 0, SPC_SDR_GROUP_DEVICE)
+            .enum_param("device", "Device", {"(no devices found)"}, 0, SPC_SDR_GROUP_DEVICE).listed()
                 .param_description("Connected receiver to use. Every RTL2832U device is listed; "
                                    "ones whose USB strings identify a NESDR model are named")
                 .mandatory()
@@ -325,7 +325,6 @@ static const SpcPluginDescriptor* get_descriptor()
             .int_param("if_gain", "IF Gain (0.1 dB)", -30, 90, 0, 10, SPC_SDR_GROUP_HARDWARE)
                 .param_description("Intermediate frequency gain in tenths of dB for the selected "
                                    "stage (E4000 tuner, XTR models only)")
-            .device_scan()
             .build_into(g_desc);
 
         patch_model_enum();
