@@ -13,7 +13,6 @@
 #ifdef SPC_HAS_VULKAN
 #include <gpu/vulkan_context.h>
 #include <gpu/gpu_host.h>
-#include <gpu/gpu_output_handle.h>
 #include <gpu/gpu_failure_tracker.h>
 #include "subsense_gpu_pipeline.h"
 #endif
