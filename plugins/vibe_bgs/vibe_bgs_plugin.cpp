@@ -91,7 +91,7 @@ SPC_PLUGIN_DESCRIPTOR(
         .int_param("learning_rate", "Learning Rate", 1, 32, 16, 1, "ViBe")
             .param_description("Chance (1 in N) that a foreground pixel updates the background model — "
                                "higher = slower absorption, keeps slow/hovering movers foreground longer")
-        .streaming().frame_alloc()
+        .frame_alloc()
 )
 
 // --- lifecycle ---
@@ -447,7 +447,7 @@ static bool acquire_input_upload(VibeBgsState* s, SpcGpuRecordCtx* rctx,
 static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
 {
     auto* s = state(inst);
-    if (!rctx || rctx->struct_size < sizeof(SpcGpuRecordCtx)) return -1;
+    if (!rctx) return -1;
     if (rctx->input_count < 1 || rctx->output_count < 2) return -1;
     if (rctx->inputs[0].type != SPC_DATA_FRAME || !rctx->inputs[0].frame) return -1;
     if (!s->gpu_available || !s->gpu_ctx || !s->gpu_pipeline) return -1;

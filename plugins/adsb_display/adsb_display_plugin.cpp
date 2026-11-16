@@ -192,7 +192,7 @@ SPC_PLUGIN_DESCRIPTOR(
             .list_column("lat", "Latitude", SPC_PARAM_FLOAT64, -90.0, 90.0, 0.0001)
             .list_column("lon", "Longitude", SPC_PARAM_FLOAT64, -180.0, 180.0, 0.0001)
             .list_column("alt", "Altitude (ft)", SPC_PARAM_FLOAT64, 0.0, 100000.0, 1.0)
-        .streaming().frame_alloc().interactive()
+        .frame_alloc()
 )
 
 // ── lifecycle ──────────────────────────────────────────────────────────

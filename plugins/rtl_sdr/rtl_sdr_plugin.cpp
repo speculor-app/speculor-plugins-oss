@@ -300,7 +300,7 @@ static const SpcPluginDescriptor* get_descriptor()
                 .param_description("Output 8-bit counter instead of samples (debug)")
             .int_param("if_gain", "IF Gain (0.1 dB)", -30, 90, 0, 10, SPC_SDR_GROUP_HARDWARE)
                 .param_description("Intermediate frequency gain in tenths of dB (E4000 tuner only)")
-            .streaming().device_scan()
+            .device_scan()
             .build_into(g_desc);
 
         scan_devices(nullptr);
