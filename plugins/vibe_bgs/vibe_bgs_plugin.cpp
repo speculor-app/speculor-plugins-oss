@@ -189,17 +189,6 @@ static int set_parameter(SpcPluginInstance* inst, const char* name, const SpcPar
     return matched ? 0 : -1;
 }
 
-static int get_parameter(SpcPluginInstance* inst, const char* name, SpcParameterDesc* out)
-{
-    auto* s = state(inst);
-    const Params p = s->params.snapshot();
-    if (spc::try_get_int(name, out, "threshold", p.threshold)) return 0;
-    if (spc::try_get_int(name, out, "bg_samples", p.bg_samples)) return 0;
-    if (spc::try_get_int(name, out, "required_bg_samples", p.required_bg_samples)) return 0;
-    if (spc::try_get_int(name, out, "learning_rate", p.learning_rate)) return 0;
-    return -1;
-}
-
 // --- streaming ---
 
 static int start(SpcPluginInstance* inst)
@@ -610,8 +599,7 @@ SPC_PLUGIN_VTABLE(
     .get_descriptor    = get_descriptor,
     .create_instance   = create_instance,
     .destroy_instance  = destroy_instance,
-    .set_parameter     = set_parameter,
-    .get_parameter     = get_parameter,
+    .params_changed    = spc::params_by_name<get_descriptor, set_parameter>,
     .process           = process,
     .start             = start,
     .stop              = stop,
@@ -623,8 +611,7 @@ SPC_PLUGIN_VTABLE(
     .get_descriptor    = get_descriptor,
     .create_instance   = create_instance,
     .destroy_instance  = destroy_instance,
-    .set_parameter     = set_parameter,
-    .get_parameter     = get_parameter,
+    .params_changed    = spc::params_by_name<get_descriptor, set_parameter>,
     .process           = process,
     .start             = start,
     .stop              = stop,

@@ -3,8 +3,9 @@
 // Every NESDR is the same RTL2832U silicon, so what this plugin adds over
 // rtl_sdr is entirely the per-model gating: which controls are real on which
 // board. That is the part worth asserting, and none of it needs a radio — the
-// profile is chosen by the Model parameter, and the contract is visible through
-// set_parameter's return code and get_parameter's DISABLED flag.
+// profile is chosen by the Model parameter, and the contract is visible in the
+// value that stands after a set: the host stores what it is given, and for a
+// control the board lacks the plugin hands back the value still in force.
 //
 // Three of the four gates exist because the ungated call does something
 // actively wrong rather than nothing:
@@ -125,9 +126,8 @@ void check_gate(spc::testing::PluginUnderTest& plugin, const char* label,
     const bool readable = read_scalar(plugin, param, before);
 
     const int rc = plugin.set_parameter(param, &v);
-    const bool ok = supported ? (rc == 0) : (rc == SPC_ERR_NOT_FOUND);
-    check(ok, std::string(label) + ": " + param +
-              (supported ? " accepted" : " rejected as unsupported"));
+    const bool ok = rc == 0;
+    check(ok, std::string(label) + ": " + param + " is a declared parameter");
     if (!ok) std::printf("    set_parameter(\"%s\") returned %d\n", param, rc);
 
     int after = 0;
@@ -207,6 +207,7 @@ int main(int argc, char** argv) {
     check(plugin.create(), "create_instance");
     if (!plugin.instance()) { std::printf("FAILED: %d\n", ++failures); return 1; }
     spc::testing::FakeHost host;
+    host.serve_params(plugin.params());
     plugin.set_host_services(host.services());
 
     // --- per-model capability gating ----------------------------------------
@@ -252,7 +253,7 @@ int main(int argc, char** argv) {
         } else if (e->bias == BIAS_GPIO) {
             check(rc == 0 && after == 0, label + ": switchable bias_tee obeys off");
         } else {
-            check(rc == SPC_ERR_NOT_FOUND && after == before,
+            check(rc == 0 && after == before,
                   label + ": bias_tee off is rejected and changes nothing");
         }
 
@@ -271,8 +272,6 @@ int main(int argc, char** argv) {
     check(plugin.set_parameter("model", &auto_sel) == 0, "model returns to Auto-detect");
 
     // --- an unknown parameter is still rejected -----------------------------
-    // The gated branches above return SPC_ERR_NOT_FOUND for names that DO exist,
-    // so this confirms the fallthrough for names that do not still works.
     const SpcParameterDesc junk = make_bool(1);
     check(plugin.set_parameter("no_such_param", &junk) == SPC_ERR_NOT_FOUND,
           "unknown parameter name rejected");

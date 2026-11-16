@@ -6,17 +6,16 @@
 // whether or not hardware is present, and they are where the heap corruption in
 // librtlsdr and the unbounded-shutdown bugs in SAPIENT both lived.
 //
-// scan_devices is the interesting one here. It rewrites the shared descriptor's
-// device enum in place, so a scan that miscounts leaves every later consumer —
-// the GUI, a project load, the engine's parameter validation — reading a
-// malformed descriptor. Re-running the full conformance suite after scanning is
-// the check for that.
+// Listing devices is the interesting one here: it runs with no instance, as
+// often as the user asks, and rewrites the plugin's own device registry. The
+// full conformance suite is run again after it.
 
 #include <testing/conformance.h>
 #include <testing/fake_host.h>
 #include <testing/plugin_under_test.h>
 
 #include <cstdio>
+#include <memory>
 #include <cstring>
 #include <string>
 
@@ -57,33 +56,23 @@ int main(int argc, char** argv) {
     spc::testing::FakeHost host;
 
     // --- scanning with nothing attached -------------------------------------
-    if (vt->scan_devices) {
+    if (vt->list_options) {
         // The ABI lets a host pass null services; a plugin that assumes
         // otherwise faults during device enumeration in the GUI.
-        const SpcPluginDescriptor* s0 = vt->scan_devices(nullptr);
-        check(s0 != nullptr, "scan_devices(null host) returns a descriptor");
+        spc::ParamHost values(vt, d);
+        values.list_options(nullptr, true);
+        values.list_options(host.services(), true);
 
-        const SpcPluginDescriptor* s1 = vt->scan_devices(host.services());
-        check(s1 != nullptr, "scan_devices(host) returns a descriptor");
+        // Repeated scans are normal: the GUI rescans whenever the user asks.
+        for (int i = 0; i < 5; ++i) values.list_options(host.services(), true);
 
-        // Repeated scans are normal — the GUI rescans whenever the device list
-        // is opened. Each one rewrites the enum, so this is where an off-by-one
-        // accumulates.
-        for (int i = 0; i < 5; ++i) (void)vt->scan_devices(host.services());
-        const SpcPluginDescriptor* sn = vt->scan_devices(host.services());
-        check(sn != nullptr, "scan_devices survives repeated calls");
-
-        if (sn) {
-            const SpcParameterDesc* dev = find_param(sn, "device");
-            if (dev) {
-                check(dev->enum_val.count >= 0 && dev->enum_val.count <= SPC_PARAM_ENUM_MAX,
-                      "device enum count stays within SPC_PARAM_ENUM_MAX");
-                check(dev->enum_val.count == 0 ||
-                          (dev->enum_val.value >= 0 && dev->enum_val.value < dev->enum_val.count),
-                      "device enum selection stays in range after scanning");
-                std::printf("    device enum after 7 scans: %d entr%s\n",
-                            dev->enum_val.count, dev->enum_val.count == 1 ? "y" : "ies");
-            }
+        auto dev = std::make_unique<SpcParameterDesc>();
+        if (values.get("device", *dev) == 0) {
+            check(dev->enum_val.count >= 0 && dev->enum_val.count <= SPC_PARAM_ENUM_MAX,
+                  "device enum count stays within SPC_PARAM_ENUM_MAX");
+            check(dev->enum_val.count == 0 ||
+                      (dev->enum_val.value >= 0 && dev->enum_val.value < dev->enum_val.count),
+                  "device selection stays within the listed options");
         }
 
         // The whole descriptor, not just the enum: scanning must not leave any
@@ -92,7 +81,7 @@ int main(int argc, char** argv) {
         check(post.ok(), "descriptor still passes conformance after scanning");
         if (!post.ok()) std::printf("%s\n", post.summary().c_str());
     } else {
-        std::printf("  (no scan_devices slot — skipping scan checks)\n");
+        std::printf("  (no list_options slot — skipping scan checks)\n");
     }
 
     // --- lifecycle with no device selected ----------------------------------

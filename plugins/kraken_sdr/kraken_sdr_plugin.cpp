@@ -165,7 +165,7 @@ SPC_PLUGIN_HOST_SERVICES(KrakenSdrState, host)
 static SpcPluginDescriptor g_desc;
 static bool g_desc_initialized = false;
 
-static const SpcPluginDescriptor* scan_devices(const SpcHostServices* svc)
+static void scan_devices(const SpcHostServices* svc)
 {
     SpcLogContext log{};
     if (svc && svc->log) log = {svc->log, svc->host_ctx};
@@ -179,8 +179,6 @@ static const SpcPluginDescriptor* scan_devices(const SpcHostServices* svc)
     else
         SPC_LOG_WARN(&log, "KrakenSDR: not detected "
                            "(need 5 RTL-SDR dongles with serials 1000-1004)");
-
-    return &g_desc;
 }
 
 static const SpcPluginDescriptor* get_descriptor()
@@ -508,47 +506,18 @@ static int set_parameter(SpcPluginInstance* inst, const char* name,
     return SPC_ERR_NOT_FOUND;
 }
 
-static int get_parameter(SpcPluginInstance* inst, const char* name, SpcParameterDesc* out)
+static void param_rules(const SpcValue* values, uint32_t* states)
 {
-    auto* s = state(inst);
-    bool no_dev = !g_registry.present;
-    bool agc_on = (s->agc_enabled != 0);
-
-    if (spc::try_get_int(name, out, SPC_SDR_CENTER_FREQ, s->center_freq)) {
-        if (no_dev) out->flags |= SPC_PARAM_FLAG_DISABLED; return 0;
-    }
-    if (spc::try_get_int(name, out, SPC_SDR_SAMPLE_RATE, s->sample_rate)) {
-        if (no_dev) out->flags |= SPC_PARAM_FLAG_DISABLED; return 0;
-    }
-    if (spc::try_get_int(name, out, SPC_SDR_BANDWIDTH, s->bandwidth)) {
-        if (no_dev) out->flags |= SPC_PARAM_FLAG_DISABLED; return 0;
-    }
-    if (spc::try_get_bool(name, out, SPC_SDR_AGC_ENABLED, s->agc_enabled)) {
-        if (no_dev) out->flags |= SPC_PARAM_FLAG_DISABLED; return 0;
-    }
-    if (spc::try_get_bool(name, out, SPC_SDR_DITHERING, s->dithering)) return 0;
-    if (spc::try_get_float(name, out, SPC_SDR_GAIN, s->gain_db)) {
-        if (no_dev || agc_on) out->flags |= SPC_PARAM_FLAG_DISABLED; return 0;
-    }
-    if (spc::try_get_float(name, out, "cal_gain_db", s->cal_gain_db)) {
-        if (no_dev) out->flags |= SPC_PARAM_FLAG_DISABLED; return 0;
-    }
-    if (spc::try_get_int(name, out, SPC_SDR_FREQ_CORRECTION, s->freq_correction)) {
-        if (no_dev) out->flags |= SPC_PARAM_FLAG_DISABLED; return 0;
-    }
-    if (spc::try_get_bool(name, out, "noise_source", s->noise_source)) {
-        if (no_dev) out->flags |= SPC_PARAM_FLAG_DISABLED; return 0;
-    }
-    for (int k = 0; k < NUM_CH; ++k) {
-        char pname[16];
-        std::snprintf(pname, sizeof(pname), "bias_tee_ch%d", k);
-        if (spc::try_get_bool(name, out, pname, s->bias_tee[k])) {
-            if (no_dev) out->flags |= SPC_PARAM_FLAG_DISABLED; return 0;
-        }
-    }
-    if (spc::try_get_bool(name, out, "relax_serial_match", s->relax_serial_match)) return 0;
-
-    return SPC_ERR_NOT_FOUND;
+    spc::ParamRules r(get_descriptor(), values, states);
+    // what the scan at load found: the same for every node, and it does not
+    // change while the process lives
+    const bool no_dev = !g_registry.present;
+    for (const char* name : {SPC_SDR_CENTER_FREQ, SPC_SDR_SAMPLE_RATE, SPC_SDR_BANDWIDTH,
+                             SPC_SDR_AGC_ENABLED, "cal_gain_db", SPC_SDR_FREQ_CORRECTION,
+                             "noise_source", "bias_tee_ch0", "bias_tee_ch1", "bias_tee_ch2",
+                             "bias_tee_ch3", "bias_tee_ch4"})
+        r.disable(name, no_dev);
+    r.disable(SPC_SDR_GAIN, no_dev || r.on(SPC_SDR_AGC_ENABLED));
 }
 
 // ── streaming ───────────────────────────────────────────────────────
@@ -1045,12 +1014,11 @@ SPC_PLUGIN_VTABLE(
     .get_descriptor    = get_descriptor,
     .create_instance   = create_instance,
     .destroy_instance  = destroy_instance,
-    .set_parameter     = set_parameter,
-    .get_parameter     = get_parameter,
+    .params_changed    = spc::params_by_name<get_descriptor, set_parameter>,
+    .param_rules       = param_rules,
     .process           = process,
     .start             = start,
     .stop              = stop,
     .set_host_services = set_host_services,
-    .scan_devices      = scan_devices,
     .request_stop      = request_stop
 )

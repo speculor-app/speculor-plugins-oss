@@ -67,7 +67,7 @@ int main(int argc, char** argv) {
     plugin.set_host_services(host.services());
 
     // --- waypoints round-trip ----------------------------------------------
-    if (vt->set_list_rows && vt->get_list_rows) {
+    if (plugin.params() && plugin.params()->has_list()) {
         std::vector<SpcListRow> in;
         in.push_back(make_waypoint("Heathrow", 1, 51.4700, -0.4543, 83.0));
         in.push_back(make_waypoint("Gatwick", 1, 51.1537, -0.1821, 202.0));
@@ -75,13 +75,13 @@ int main(int argc, char** argv) {
         std::string long_name(SPC_LIST_CELL_STRING_MAX - 1, 'x');
         in.push_back(make_waypoint(long_name.c_str(), 4, -33.9425, 151.1783, 21.0));
 
-        const int set_rc = vt->set_list_rows(plugin.instance(), "waypoints",
+        const int set_rc = plugin.params()->set_list("waypoints",
                                              in.data(), static_cast<int32_t>(in.size()));
         check(set_rc == 0, "set_list_rows accepts waypoints");
 
         SpcListRow out[16]{};
         int32_t count = -1;
-        const int get_rc = vt->get_list_rows(plugin.instance(), "waypoints", out, 16, &count);
+        const int get_rc = plugin.params()->get_list("waypoints", out, 16, &count);
         check(get_rc == 0, "get_list_rows succeeds");
         check(count == static_cast<int32_t>(in.size()),
               "row count survives the round-trip");
@@ -109,27 +109,27 @@ int main(int argc, char** argv) {
         // it allocated — the classic buffer overrun in this shape of API.
         SpcListRow one_row[1]{};
         int32_t small_count = -1;
-        const int trunc_rc = vt->get_list_rows(plugin.instance(), "waypoints",
+        const int trunc_rc = plugin.params()->get_list("waypoints",
                                                one_row, 1, &small_count);
         check(small_count <= 1,
               "get_list_rows respects max_rows and never overfills");
         std::printf("    max_rows=1 request returned rc=%d count=%d\n", trunc_rc, small_count);
 
         // Clearing is what "delete all waypoints" does in the GUI.
-        check(vt->set_list_rows(plugin.instance(), "waypoints", nullptr, 0) == 0,
+        check(plugin.params()->set_list("waypoints", nullptr, 0) == 0,
               "set_list_rows accepts an empty list");
         int32_t cleared = -1;
-        vt->get_list_rows(plugin.instance(), "waypoints", out, 16, &cleared);
+        plugin.params()->get_list("waypoints", out, 16, &cleared);
         check(cleared == 0, "cleared list reads back empty");
 
         // An unknown list name must be refused, not silently treated as one of
         // the real ones.
         int32_t bogus_count = -1;
-        check(vt->get_list_rows(plugin.instance(), "__no_such_list__",
+        check(plugin.params()->get_list("__no_such_list__",
                                 out, 16, &bogus_count) != 0,
               "get_list_rows rejects an unknown list name");
     } else {
-        std::printf("  (no list-row slots — skipping waypoint checks)\n");
+        std::printf("  (no list parameter — skipping waypoint checks)\n");
     }
 
     // --- process with nothing connected -------------------------------------

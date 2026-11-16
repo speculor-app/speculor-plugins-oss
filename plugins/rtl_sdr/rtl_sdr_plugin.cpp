@@ -139,23 +139,6 @@ SPC_PLUGIN_HOST_SERVICES(RtlSdrState, host)
 static SpcPluginDescriptor g_desc;
 static bool g_desc_initialized = false;
 
-static void patch_device_enum()
-{
-    for (uint32_t i = 0; i < g_desc.param_count; ++i) {
-        if (std::strcmp(g_desc.params[i].name, "device") == 0) {
-            auto& ev = g_desc.params[i].enum_val;
-            ev.count = g_registry.count;
-            for (int j = 0; j < g_registry.count; ++j) {
-                std::strncpy(ev.labels[j], g_registry.devices[j].label,
-                             SPC_PARAM_ENUM_LABEL_MAX - 1);
-                ev.labels[j][SPC_PARAM_ENUM_LABEL_MAX - 1] = '\0';
-                std::strncpy(ev.ids[j], g_registry.ids[j], SPC_PARAM_ENUM_ID_MAX - 1);
-                ev.ids[j][SPC_PARAM_ENUM_ID_MAX - 1] = '\0';
-            }
-        }
-    }
-}
-
 // Snap a requested dB gain to the nearest hardware-supported step and apply it.
 // The tuner only supports a discrete set of gains (queried into s->gains at
 // open); we keep the user-facing value a device-independent dB float so it
@@ -210,14 +193,13 @@ static void apply_direct_sampling(RtlSdrState* s, int want)
     apply_gain_config(s);
 }
 
-static const SpcPluginDescriptor* scan_devices(const SpcHostServices* svc)
+static void scan_devices(const SpcHostServices* svc)
 {
     SpcLogContext log{};
     if (svc && svc->log) log = {svc->log, svc->host_ctx};
 
     SPC_LOG_INFO(&log, "RTL-SDR: scanning for devices...");
     g_registry.scan(&log);
-    patch_device_enum();
 
     if (!spc::rtlsdr::RtlSdrDevice::is_api_loaded()) {
         SPC_LOG_WARN(&log, "RTL-SDR: rtlsdr library not found");
@@ -243,8 +225,6 @@ static const SpcPluginDescriptor* scan_devices(const SpcHostServices* svc)
                                "they are replugged. Flash a unique serial to each "
                                "instead: 'rtl_eeprom -d 1 -s 00000002', then replug.");
     }
-
-    return &g_desc;
 }
 
 static const SpcPluginDescriptor* get_descriptor()
@@ -415,78 +395,29 @@ static int set_parameter(SpcPluginInstance* inst, const char* name,
     return SPC_ERR_NOT_FOUND;
 }
 
-static int get_parameter(SpcPluginInstance* inst, const char* name,
-                         SpcParameterDesc* out)
+static void param_rules(const SpcValue* values, uint32_t* states)
 {
-    auto* s = state(inst);
-    bool no_dev = (s->device_idx == 0);
-    bool agc_on = (s->agc_enabled != 0);
+    spc::ParamRules r(get_descriptor(), values, states);
+    // the first option is "None": the user must scan and pick a real device
+    const bool no_dev = r.choice("device") <= 0;
+    r.missing("device", no_dev);
+    for (const char* name : {SPC_SDR_CENTER_FREQ, SPC_SDR_SAMPLE_RATE, SPC_SDR_BANDWIDTH,
+                             SPC_SDR_AGC_ENABLED, SPC_SDR_DIRECT_SAMPLING, "offset_tuning",
+                             SPC_SDR_BIAS_TEE, SPC_SDR_FREQ_CORRECTION, SPC_SDR_DITHERING,
+                             "test_mode", "if_gain"})
+        r.disable(name, no_dev);
+    r.disable(SPC_SDR_GAIN, no_dev || r.on(SPC_SDR_AGC_ENABLED));
+}
 
-    // dynamic device enum — populate labels from registry
-    if (std::strcmp(name, "device") == 0) {
-        out->type = SPC_PARAM_ENUM;
-        out->enum_val.value = s->device_idx;
-        out->enum_val.count = g_registry.count;
-        for (int i = 0; i < g_registry.count; ++i)
-            std::strncpy(out->enum_val.labels[i], g_registry.devices[i].label, SPC_PARAM_ENUM_LABEL_MAX);
-        return 0;
-    }
-
-    // tuning
-    if (spc::try_get_int(name, out, SPC_SDR_CENTER_FREQ, s->center_freq)) {
-        if (no_dev) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-    if (spc::try_get_int(name, out, SPC_SDR_SAMPLE_RATE, s->sample_rate)) {
-        if (no_dev) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-    if (spc::try_get_int(name, out, SPC_SDR_BANDWIDTH, s->bandwidth)) {
-        if (no_dev) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-
-    // gain
-    if (spc::try_get_bool(name, out, SPC_SDR_AGC_ENABLED, s->agc_enabled)) {
-        if (no_dev) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-    if (spc::try_get_float(name, out, SPC_SDR_GAIN, s->gain_db)) {
-        if (no_dev || agc_on) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-
-    // hardware
-    if (spc::try_get_enum(name, out, SPC_SDR_DIRECT_SAMPLING, s->direct_sampling)) {
-        if (no_dev) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-    if (spc::try_get_bool(name, out, "offset_tuning", s->offset_tuning)) {
-        if (no_dev) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-    if (spc::try_get_bool(name, out, SPC_SDR_BIAS_TEE, s->bias_tee)) {
-        if (no_dev) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-    if (spc::try_get_int(name, out, SPC_SDR_FREQ_CORRECTION, s->freq_correction)) {
-        if (no_dev) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-    if (spc::try_get_bool(name, out, SPC_SDR_DITHERING, s->dithering)) {
-        if (no_dev) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-    if (spc::try_get_bool(name, out, "test_mode", s->test_mode)) {
-        if (no_dev) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-    if (spc::try_get_int(name, out, "if_gain", s->if_gain)) {
-        if (no_dev) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-
-    return SPC_ERR_NOT_FOUND;
+static int list_options(uint32_t param, const SpcValue*, int refresh,
+                        const SpcHostServices* host_services,
+                        SpcOptionSinkFn sink, void* sink_ctx)
+{
+    if (param != spc::param_index(get_descriptor(), "device")) return SPC_ERR_NOT_FOUND;
+    if (refresh) scan_devices(host_services);
+    for (int i = 0; i < g_registry.count; ++i)
+        sink(sink_ctx, g_registry.ids[i], g_registry.devices[i].label);
+    return SPC_OK;
 }
 
 // ── streaming ───────────────────────────────────────────────────────
@@ -637,31 +568,18 @@ static int process(SpcPluginInstance* inst, const SpcData*, uint32_t,
     return 0;
 }
 
-// ── mandatory-parameter validation ──────────────────────────────────
-// Device index 0 is the "(no devices found)" placeholder; user must scan
-// and pick a real device before starting.
-static int validate_mandatory(SpcPluginInstance* inst, SpcMissingParams* out)
-{
-    auto* s = state(inst);
-    if (s->device_idx <= 0) {
-        spc::add_missing(*out, "device");
-    }
-    return 0;
-}
-
 // ── export ──────────────────────────────────────────────────────────
 
 SPC_PLUGIN_VTABLE(
     .get_descriptor     = get_descriptor,
     .create_instance    = create_instance,
     .destroy_instance   = destroy_instance,
-    .set_parameter      = set_parameter,
-    .get_parameter      = get_parameter,
+    .params_changed    = spc::params_by_name<get_descriptor, set_parameter>,
+    .param_rules        = param_rules,
+    .list_options       = list_options,
     .process            = process,
     .start              = start,
     .stop               = stop,
     .set_host_services  = set_host_services,
-    .scan_devices       = scan_devices,
-    .validate_mandatory = validate_mandatory,
     .request_stop       = request_stop
 )

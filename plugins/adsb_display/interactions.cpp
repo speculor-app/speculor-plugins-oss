@@ -204,7 +204,7 @@ static int handle_delete_confirm_event(MapDisplayState* s, const SpcInputEvent* 
                     // info-panel selection and notify the host so the
                     // Parameters > Map Waypoints list refreshes.
                     s->info_panel_waypoint_idx.store(-1, std::memory_order_relaxed);
-                    s->host.notify_list_changed("waypoints");
+                    push_waypoints(s);
                 }
                 s->delete_confirm_idx.store(-1, std::memory_order_relaxed);
                 return 0;
@@ -350,7 +350,7 @@ int handle_event(MapDisplayState* s, const SpcInputEvent* event)
                         // it doesn't display stale data, and notify the host
                         // so the Parameters > Map Waypoints list refreshes.
                         s->info_panel_waypoint_idx.store(-1, std::memory_order_relaxed);
-                        s->host.notify_list_changed("waypoints");
+                        push_waypoints(s);
                     }
                 }
             }

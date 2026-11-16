@@ -234,6 +234,25 @@ static void destroy_instance(SpcPluginInstance* inst)
 
 // ── parameters ─────────────────────────────────────────────────────────
 
+// The user pans and zooms on the map itself, and zoom and radius each rewrite
+// the other: give the host what the view has become, so it is shown and saved.
+static void push_view(MapDisplayState* s)
+{
+    static const uint32_t k_lat = spc::param_index(get_descriptor(), "center_lat");
+    static const uint32_t k_lon = spc::param_index(get_descriptor(), "center_lon");
+    static const uint32_t k_zoom = spc::param_index(get_descriptor(), "zoom");
+    static const uint32_t k_radius = spc::param_index(get_descriptor(), "radius");
+
+    const double lat = s->center_lat.load(std::memory_order_relaxed);
+    const double lon = s->center_lon.load(std::memory_order_relaxed);
+    const float zoom = s->zoom.load(std::memory_order_relaxed);
+    const float radius = s->radius.load(std::memory_order_relaxed);
+    if (lat != s->pushed_lat) { s->host.set_float64(k_lat, lat); s->pushed_lat = lat; }
+    if (lon != s->pushed_lon) { s->host.set_float64(k_lon, lon); s->pushed_lon = lon; }
+    if (zoom != s->pushed_zoom) { s->host.set_float(k_zoom, zoom); s->pushed_zoom = zoom; }
+    if (radius != s->pushed_radius) { s->host.set_float(k_radius, radius); s->pushed_radius = radius; }
+}
+
 static int set_parameter(SpcPluginInstance* inst, const char* name,
                          const SpcParameterDesc* value)
 {
@@ -263,6 +282,7 @@ static int set_parameter(SpcPluginInstance* inst, const char* name,
         s->interactive_view.store(false, std::memory_order_relaxed);
         const Params p = s->params.snapshot();
         sync_radius_from_zoom(s, p.height);
+        push_view(s);
         return 0;
     }
     if (std::strcmp(name, "radius") == 0 && value->type == SPC_PARAM_FLOAT) {
@@ -270,6 +290,7 @@ static int set_parameter(SpcPluginInstance* inst, const char* name,
         s->interactive_view.store(false, std::memory_order_relaxed);
         const Params p = s->params.snapshot();
         sync_zoom_from_radius(s, p.width, p.height);
+        push_view(s);
         return 0;
     }
 
@@ -333,153 +354,65 @@ static int set_parameter(SpcPluginInstance* inst, const char* name,
     return 0;
 }
 
-static int get_parameter(SpcPluginInstance* inst, const char* name,
-                         SpcParameterDesc* out)
+static void param_rules(const SpcValue* values, uint32_t* states)
 {
-    auto* s = state(inst);
-    const Params p = s->params.snapshot();
-    bool auto_view = (s->view_mode.load(std::memory_order_relaxed) == 0);
+    spc::ParamRules r(get_descriptor(), values, states);
 
-    if (spc::try_get_enum(name, out, "view_mode", s->view_mode.load(std::memory_order_relaxed))) return 0;
-    if (spc::try_get_float64(name, out, "center_lat", s->center_lat.load(std::memory_order_relaxed))) {
-        if (auto_view) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-    if (spc::try_get_float64(name, out, "center_lon", s->center_lon.load(std::memory_order_relaxed))) {
-        if (auto_view) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-    if (spc::try_get_float(name, out, "zoom", s->zoom.load(std::memory_order_relaxed))) {
-        if (auto_view) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-    if (spc::try_get_float(name, out, "radius", s->radius.load(std::memory_order_relaxed))) {
-        if (auto_view) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-    if (spc::try_get_int(name, out, "width", p.width)) return 0;
-    if (spc::try_get_int(name, out, "height", p.height)) return 0;
-    if (spc::try_get_enum(name, out, "map_style", p.map_style)) return 0;
-    if (spc::try_get_string(name, out, "custom_server", p.custom_server)) {
-        if (p.map_style != 6) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-    if (spc::try_get_float(name, out, "icon_scale", p.icon_scale)) return 0;
-    if (spc::try_get_float(name, out, "font_size", p.font_size)) return 0;
-    if (spc::try_get_enum(name, out, "unit_system", p.unit_system)) return 0;
-    if (spc::try_get_bool(name, out, "show_labels", p.show_labels)) return 0;
-    if (spc::try_get_bool(name, out, "show_trails", p.show_trails)) return 0;
-    if (spc::try_get_int(name, out, "trail_length", p.trail_length)) {
-        if (!p.show_trails) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-    if (spc::try_get_bool(name, out, "show_trend_vector", p.show_trend_vector)) return 0;
-    if (spc::try_get_float(name, out, "trend_seconds", p.trend_seconds)) {
-        if (!p.show_trend_vector) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-    if (spc::try_get_bool(name, out, "show_vs_indicator", p.show_vs_indicator)) return 0;
-    if (spc::try_get_bool(name, out, "show_staleness_fade", p.show_staleness_fade)) return 0;
-    if (spc::try_get_int(name, out, "filter_alt_min", p.filter_alt_min)) return 0;
-    if (spc::try_get_int(name, out, "filter_alt_max", p.filter_alt_max)) return 0;
-    if (spc::try_get_float(name, out, "filter_distance_max_km", p.filter_distance_max_km)) return 0;
-    if (spc::try_get_bool(name, out, "filter_show_ground", p.filter_show_ground)) return 0;
-    if (spc::try_get_bool(name, out, "filter_military_only", p.filter_military_only)) return 0;
-    if (spc::try_get_string(name, out, "filter_callsign_substr", p.filter_callsign_substr)) return 0;
-    if (spc::try_get_bool(name, out, "show_airspace", p.show_airspace)) return 0;
-    if (spc::try_get_enum(name, out, "airspace_classes", p.airspace_classes)) {
-        if (!p.show_airspace) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-    if (spc::try_get_float(name, out, "airspace_opacity", p.airspace_opacity)) {
-        if (!p.show_airspace) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-    if (spc::try_get_int(name, out, "airspace_altitude_ft", p.airspace_altitude_ft)) {
-        if (!p.show_airspace) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-    if (spc::try_get_bool(name, out, "show_airports", p.show_airports)) return 0;
-    if (spc::try_get_enum(name, out, "airport_min_type", p.airport_min_type)) {
-        if (!p.show_airports) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-    if (spc::try_get_bool(name, out, "show_origin_dest_highlight", p.show_origin_dest_highlight)) {
-        if (!p.show_airports) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-    if (spc::try_get_bool(name, out, "show_range_rings", p.show_range_rings)) return 0;
-    if (spc::try_get_float(name, out, "range_ring_interval", p.range_ring_interval)) {
-        if (!p.show_range_rings) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-    if (spc::try_get_color(name, out, "range_ring_color", p.range_ring_color)) {
-        if (!p.show_range_rings) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-    if (spc::try_get_int(name, out, "range_ring_thickness", p.range_ring_thickness)) {
-        if (!p.show_range_rings) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-    if (spc::try_get_enum(name, out, "range_ring_style", p.range_ring_style)) {
-        if (!p.show_range_rings) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-    if (spc::try_get_float(name, out, "range_ring_opacity", p.range_ring_opacity)) {
-        if (!p.show_range_rings) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-    if (spc::try_get_float(name, out, "range_ring_font_size", p.range_ring_font_size)) {
-        if (!p.show_range_rings) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-    if (spc::try_get_bool(name, out, "show_max_range", p.show_max_range)) return 0;
-    if (spc::try_get_color(name, out, "max_range_color", p.max_range_color)) {
-        if (!p.show_max_range) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-    if (spc::try_get_float(name, out, "max_range_opacity", p.max_range_opacity)) {
-        if (!p.show_max_range) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-    if (spc::try_get_float(name, out, "max_range_font_size", p.max_range_font_size)) {
-        if (!p.show_max_range) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-    if (spc::try_get_float(name, out, "info_font_size", p.info_font_size)) return 0;
-    if (spc::try_get_float(name, out, "info_panel_opacity", p.info_panel_opacity)) return 0;
-    if (spc::try_get_bool(name, out, "show_list", p.show_list)) return 0;
-    if (spc::try_get_int(name, out, "list_width", p.list_width)) {
-        if (!p.show_list) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-    if (std::strcmp(name, "waypoints") == 0) {
-        out->type = SPC_PARAM_LIST;
-        std::lock_guard lock(s->waypoints_mutex);
-        out->list_val.row_count = static_cast<int32_t>(s->waypoints.size());
-        return 0;
-    }
-    return -1;
+    const bool auto_view = r.choice("view_mode") == 0;
+    r.disable("center_lat", auto_view);
+    r.disable("center_lon", auto_view);
+    r.disable("zoom", auto_view);
+    r.disable("radius", auto_view);
+
+    r.disable("custom_server", r.choice("map_style") != 6);
+    r.disable("trail_length", !r.on("show_trails"));
+    r.disable("trend_seconds", !r.on("show_trend_vector"));
+
+    const bool airspace = r.on("show_airspace");
+    r.disable("airspace_classes", !airspace);
+    r.disable("airspace_opacity", !airspace);
+    r.disable("airspace_altitude_ft", !airspace);
+
+    const bool airports = r.on("show_airports");
+    r.disable("airport_min_type", !airports);
+    r.disable("show_origin_dest_highlight", !airports);
+
+    const bool rings = r.on("show_range_rings");
+    r.disable("range_ring_interval", !rings);
+    r.disable("range_ring_color", !rings);
+    r.disable("range_ring_thickness", !rings);
+    r.disable("range_ring_style", !rings);
+    r.disable("range_ring_opacity", !rings);
+    r.disable("range_ring_font_size", !rings);
+
+    const bool max_range = r.on("show_max_range");
+    r.disable("max_range_color", !max_range);
+    r.disable("max_range_opacity", !max_range);
+    r.disable("max_range_font_size", !max_range);
+
+    r.disable("list_width", !r.on("show_list"));
 }
 
 // ── list parameter handlers ────────────────────────────────────────────
 
-static int get_list_rows_impl(MapDisplayState* s, const char* name,
-                                SpcListRow* out, int32_t max, int32_t* count)
+void push_waypoints(MapDisplayState* s)
 {
-    if (std::strcmp(name, "waypoints") != 0) return -1;
-    std::lock_guard lock(s->waypoints_mutex);
-    int32_t n = std::min(static_cast<int32_t>(s->waypoints.size()), max);
-    for (int32_t i = 0; i < n; ++i) {
-        std::memset(&out[i], 0, sizeof(SpcListRow));
-        std::strncpy(out[i].cells[0].string_val, s->waypoints[i].name, SPC_LIST_CELL_STRING_MAX - 1);
-        out[i].cells[1].enum_val = s->waypoints[i].type;
-        out[i].cells[2].float64_val = s->waypoints[i].lat;
-        out[i].cells[3].float64_val = s->waypoints[i].lon;
-        out[i].cells[4].float64_val = s->waypoints[i].alt;
+    const SpcPluginDescriptor* desc = get_descriptor();
+    const uint32_t param = spc::param_index(desc, "waypoints");
+    std::vector<SpcListRow> rows;
+    {
+        std::lock_guard lock(s->waypoints_mutex);
+        rows.resize(std::min<size_t>(s->waypoints.size(), SPC_LIST_ROW_MAX));
+        for (size_t i = 0; i < rows.size(); ++i) {
+            std::strncpy(rows[i].cells[0].string_val, s->waypoints[i].name, SPC_LIST_CELL_STRING_MAX - 1);
+            rows[i].cells[1].enum_val = s->waypoints[i].type;
+            rows[i].cells[2].float64_val = s->waypoints[i].lat;
+            rows[i].cells[3].float64_val = s->waypoints[i].lon;
+            rows[i].cells[4].float64_val = s->waypoints[i].alt;
+        }
     }
-    *count = n;
-    return 0;
+    s->host.set_list(param, desc->list_schemas[desc->params[param].list_val.schema_index],
+                     rows.data(), static_cast<int32_t>(rows.size()));
 }
 
 static int set_list_rows_impl(MapDisplayState* s, const char* name,
@@ -504,7 +437,26 @@ static int set_list_rows_impl(MapDisplayState* s, const char* name,
     return 0;
 }
 
-SPC_PLUGIN_LIST_HANDLERS(MapDisplayState, get_list_rows_impl, set_list_rows_impl)
+SPC_PLUGIN_LIST_HANDLER(MapDisplayState, set_list_rows_impl)
+
+// A new instance, or a loaded project, is told zoom and radius together, each
+// undoing the other as it is applied. Zoom is the one the map is drawn from, so
+// it is the one kept, and the radius follows from it at the frame size that
+// arrived in the same call.
+static void params_changed(SpcPluginInstance* inst, const SpcValue* values, uint64_t changed)
+{
+    static const uint32_t k_zoom = spc::param_index(get_descriptor(), "zoom");
+    static const uint32_t k_radius = spc::param_index(get_descriptor(), "radius");
+
+    spc::params_by_name<get_descriptor, set_parameter, set_list_rows>(inst, values, changed);
+
+    const uint64_t both = (uint64_t{1} << k_zoom) | (uint64_t{1} << k_radius);
+    if ((changed & both) != both) return;
+    auto* s = state(inst);
+    s->zoom.store(values[k_zoom].f, std::memory_order_relaxed);
+    sync_radius_from_zoom(s, s->params.snapshot().height);
+    push_view(s);
+}
 
 // ── streaming ──────────────────────────────────────────────────────────
 
@@ -1339,6 +1291,9 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs,
 
     s->frame_number++;
 
+    // a drag moves the centre on every mouse move: the host hears where it ended
+    if (!s->drag_active.load(std::memory_order_relaxed)) push_view(s);
+
     std::this_thread::sleep_for(std::chrono::milliseconds(33));
     return 0;
 }
@@ -1347,13 +1302,10 @@ SPC_PLUGIN_VTABLE(
     .get_descriptor    = get_descriptor,
     .create_instance   = create_instance,
     .destroy_instance  = destroy_instance,
-    .set_parameter     = set_parameter,
-    .get_parameter     = get_parameter,
+    .params_changed    = params_changed,
+    .param_rules       = param_rules,
     .process           = process,
     .start             = start,
     .stop              = stop,
     .set_host_services = set_host_services,
-    .on_input_event          = on_input_event,
-    .get_list_rows     = get_list_rows,
-    .set_list_rows     = set_list_rows
-)
+    .on_input_event          = on_input_event)
