@@ -42,7 +42,10 @@ int main(int argc, char** argv) {
     const auto report = spc::testing::run_conformance(
         plugin, spc::testing::kProcessBound, [&](spc::testing::FakeHost& host) {
 #ifdef SPC_HAS_VULKAN
-            if (gpu) host.lend_gpu(spc::gpu::host_device(*gpu), &spc::gpu::host_buffer);
+            if (gpu)
+                host.lend_gpu(spc::gpu::host_device(*gpu),
+                              {&spc::gpu::host_buffer, &spc::gpu::host_share_buffer,
+                               &spc::gpu::host_unshare_buffer, &spc::gpu::host_read_buffer});
 #else
             (void)host;
 #endif

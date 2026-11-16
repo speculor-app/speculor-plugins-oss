@@ -12,7 +12,6 @@
 #ifdef SPC_HAS_VULKAN
 #include <gpu/vulkan_context.h>
 #include <gpu/gpu_host.h>
-#include <gpu/gpu_output_handle.h>
 #include <gpu/gpu_failure_tracker.h>
 #include "vibe_gpu_pipeline.h"
 #endif
@@ -62,7 +61,6 @@ struct VibeBgsState
     bool gpu_available;
     bool gpu_model_initialized;
     uint32_t gpu_frame_counter;
-    spc::gpu::GpuOutputHandle gpu_output;
     spc::gpu::GpuFailureTracker gpu_failure{"ViBe"};
 #endif
 };
@@ -130,8 +128,6 @@ static void destroy_instance(SpcPluginInstance* inst)
 {
     auto* s = state(inst);
 #ifdef SPC_HAS_VULKAN
-    if (s->gpu_ctx)
-        s->gpu_output.release(s->gpu_ctx.get());
     if (s->gpu_pipeline && s->gpu_ctx)
         s->gpu_pipeline->destroy(*s->gpu_ctx);
     s->gpu_pipeline.reset();
@@ -237,7 +233,6 @@ static int stop(SpcPluginInstance* inst)
     auto* s = state(inst);
 #ifdef SPC_HAS_VULKAN
     if (s->gpu_ctx) {
-        s->gpu_output.release(s->gpu_ctx.get());
         if (s->gpu_pipeline)
             s->gpu_pipeline->destroy(*s->gpu_ctx);
     }
