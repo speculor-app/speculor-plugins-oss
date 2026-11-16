@@ -87,7 +87,7 @@ SPC_PLUGIN_DESCRIPTOR(
             .param_description("Minimum adaptive learning rate per pixel (CPU only)")
         .float_param("learning_rate_upper", "LR Upper Bound", 0.001f, 1.0f, 0.1f, 0.001f, "SuBSENSE")
             .param_description("Maximum adaptive learning rate per pixel (CPU only)")
-        .streaming().frame_alloc()
+        .frame_alloc()
 )
 
 // --- lifecycle ---
@@ -440,7 +440,7 @@ static bool acquire_input_upload(SubsenseBgsState* s, SpcGpuRecordCtx* rctx,
 static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
 {
     auto* s = state(inst);
-    if (!rctx || rctx->struct_size < sizeof(SpcGpuRecordCtx)) return -1;
+    if (!rctx) return -1;
     if (rctx->input_count < 1 || rctx->output_count < 2) return -1;
     if (rctx->inputs[0].type != SPC_DATA_FRAME || !rctx->inputs[0].frame) return -1;
     if (!s->gpu_available || !s->gpu_ctx || !s->gpu_pipeline) return -1;
