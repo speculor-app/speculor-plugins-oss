@@ -31,6 +31,7 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <numbers>
@@ -664,6 +665,13 @@ struct MapDisplayState
     std::atomic<float> zoom{6.0f};
     std::atomic<float> radius{50.0f};
 
+    // The view as this plugin last gave it to the host (push_view); NaN until
+    // it has. Written where parameters are applied and on the worker only.
+    double pushed_lat = std::numeric_limits<double>::quiet_NaN();
+    double pushed_lon = std::numeric_limits<double>::quiet_NaN();
+    float pushed_zoom = std::numeric_limits<float>::quiet_NaN();
+    float pushed_radius = std::numeric_limits<float>::quiet_NaN();
+
     // tracked maximum distance — worker-owned (written in process)
     double max_range_km = 0.0;
 
@@ -927,4 +935,9 @@ struct MapDisplayState
     std::atomic<bool> reference_loaded{false};
     std::jthread loader_thread;   // joins on plugin-state destruction
 };
+
+// Give the host the waypoints as they stand after an edit made on the map, so
+// the Parameters > Map Waypoints list shows it and the project saves it.
+// Defined beside the descriptor, in adsb_display_plugin.cpp.
+void push_waypoints(MapDisplayState* s);
 

@@ -140,14 +140,15 @@ port with no special-casing.
 **Hardware** — `model`, `direct_sampling`, `offset_tuning`, `bias_tee`,
 `freq_correction`, `dithering`, `test_mode`, `if_gain_stage`, `if_gain`.
 
-A control the resolved board does not have is reported `SPC_PARAM_FLAG_DISABLED`
-by `get_parameter`, and `set_parameter` answers `SPC_ERR_NOT_FOUND` **without
-storing the value** — answering "unsupported" while quietly keeping it would
-hand the next `start()` a setting the caller was told was refused.
+A control the resolved board does not have reads `SPC_PARAM_FLAG_DISABLED` (the
+plugin tells the host with `set_disabled` once the model is known), and a set of
+one is logged and **not stored**: the plugin hands the host back the value still
+in force (`host.set_int` / `set_choice`) — quietly keeping it would hand the next
+`start()` a setting the board does not have.
 
 `center_freq` is clamped to the profile's range when applied, with a warning
 logged once per distinct request rather than once per retune. The requested
-value is what `get_parameter` returns; the **I/Q table metadata carries the
+value is what the parameter shows; the **I/Q table metadata carries the
 truth**, stamped from the hardware's own `rtlsdr_get_center_freq()` /
 `rtlsdr_get_sample_rate()` rather than from the request, because the tuner snaps
 to what its PLL can synthesise.

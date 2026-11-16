@@ -97,11 +97,11 @@ endif()
 # ── nesdr: the per-model capability table ────────────────────────────
 # What nesdr adds over rtl_sdr is entirely the gating — which controls are real
 # on which NooElec board — and none of it needs a radio: the profile is picked
-# by the Model parameter, and the contract shows up in set_parameter's return
-# code and get_parameter's DISABLED flag. Three of the gates exist because the
-# ungated call misbehaves rather than no-ops (offset tuning is routed to the
-# bias tee on an R820T2, direct sampling reaches an unwired pin, a SMArTee's
-# bias tee is not on the GPIO at all).
+# by the Model parameter, and the contract shows up in a parameter's DISABLED
+# flag and in the value that stands after a set. Three of the gates exist
+# because the ungated call misbehaves rather than no-ops (offset tuning is
+# routed to the bias tee on an R820T2, direct sampling reaches an unwired pin,
+# a SMArTee's bias tee is not on the GPIO at all).
 if(TARGET nesdr)
     spc_add_plugin_test(spc_nesdr_models
         SOURCES nesdr_models_runner.cpp

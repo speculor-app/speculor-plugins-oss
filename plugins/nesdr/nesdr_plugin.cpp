@@ -188,20 +188,6 @@ static SpcParameterDesc* find_param(const char* name)
     return nullptr;
 }
 
-static void patch_device_enum()
-{
-    SpcParameterDesc* p = find_param("device");
-    if (!p) return;
-    auto& ev = p->enum_val;
-    ev.count = g_registry.count;
-    for (int j = 0; j < g_registry.count; ++j) {
-        std::strncpy(ev.labels[j], g_registry.devices[j].label, SPC_PARAM_ENUM_LABEL_MAX - 1);
-        ev.labels[j][SPC_PARAM_ENUM_LABEL_MAX - 1] = '\0';
-        std::strncpy(ev.ids[j], g_registry.ids[j], SPC_PARAM_ENUM_ID_MAX - 1);
-        ev.ids[j][SPC_PARAM_ENUM_ID_MAX - 1] = '\0';
-    }
-}
-
 // Fill the model override's options from the capability table rather than
 // restating them as literals, so a model added to the table cannot go missing
 // from the parameter.
@@ -222,14 +208,13 @@ static void patch_model_enum()
     }
 }
 
-static const SpcPluginDescriptor* scan_devices(const SpcHostServices* svc)
+static void scan_devices(const SpcHostServices* svc)
 {
     SpcLogContext log{};
     if (svc && svc->log) log = {svc->log, svc->host_ctx};
 
     SPC_LOG_INFO(&log, "NESDR: scanning for devices...");
     g_registry.scan(&log);
-    patch_device_enum();
 
     if (!spc::rtlsdr::RtlSdrDevice::is_api_loaded()) {
         SPC_LOG_WARN(&log, "NESDR: rtlsdr library not found");
@@ -257,8 +242,6 @@ static const SpcPluginDescriptor* scan_devices(const SpcHostServices* svc)
                                "they are replugged. Flash a unique serial to each "
                                "instead: 'rtl_eeprom -d 1 -s 00000002', then replug.");
     }
-
-    return &g_desc;
 }
 
 static const SpcPluginDescriptor* get_descriptor()
@@ -484,6 +467,27 @@ static void apply_center_freq(NesdrState* s)
     refresh_actuals(s);
 }
 
+// Grey out the controls the profile in force has no hardware behind. A bias tee
+// the board powers by itself reads as on.
+static void show_profile(NesdrState* s)
+{
+    const SpcPluginDescriptor* d = get_descriptor();
+    const ModelCaps* p = active_profile(s);
+    const bool e4000 = p && p->tuner == Tuner::E4000;
+
+    s->host.set_disabled(spc::param_index(d, SPC_SDR_DIRECT_SAMPLING), !p || !p->direct_sampling);
+    s->host.set_disabled(spc::param_index(d, "offset_tuning"), !p || !p->offset_tuning);
+    s->host.set_disabled(spc::param_index(d, SPC_SDR_BIAS_TEE), !p || p->bias != BiasTee::Gpio);
+    s->host.set_disabled(spc::param_index(d, SPC_SDR_DITHERING), !p || !p->dithering);
+    s->host.set_disabled(spc::param_index(d, "if_gain_stage"), !e4000);
+    s->host.set_disabled(spc::param_index(d, "if_gain"), !e4000);
+
+    if (p && p->bias == BiasTee::AlwaysOn && !s->bias_tee) {
+        s->bias_tee = 1;
+        s->host.set_int(spc::param_index(d, SPC_SDR_BIAS_TEE), 1);
+    }
+}
+
 // ── lifecycle ───────────────────────────────────────────────────────
 
 static SpcPluginInstance* create_instance()
@@ -514,13 +518,15 @@ static int set_parameter(SpcPluginInstance* inst, const char* name,
     auto* dev = s->device.get();
     bool live = dev && dev->is_open();
 
-    if (spc::try_set_enum(name, value, "device", s->device_idx)) return 0;
-
-    if (spc::try_set_enum(name, value, "model", s->model_idx)) {
+    if (spc::try_set_enum(name, value, "device", s->device_idx)
+        || spc::try_set_enum(name, value, "model", s->model_idx)) {
         // Only meaningful while stopped: the profile decides what start()
         // programs. Refresh the pre-open resolution so the parameter gating
         // updates immediately in the UI.
-        if (!live) s->profile = pre_open_profile(s);
+        if (!live) {
+            s->profile = pre_open_profile(s);
+            show_profile(s);
+        }
         return 0;
     }
 
@@ -555,14 +561,20 @@ static int set_parameter(SpcPluginInstance* inst, const char* name,
     // a rejected set leaves no trace: sdr_params.h makes SPC_ERR_NOT_FOUND the
     // report for "this device does not have that", and a plugin that answers
     // "unsupported" while quietly keeping the value would hand the next start()
-    // a setting the user was told was refused.
+    // a setting the user was told was refused. The host is handed back the
+    // value still in force. A set that asks for that same value is no request
+    // and is passed over in silence: every parameter arrives once, with its
+    // default, before the first start().
+    const uint32_t param = spc::param_index(get_descriptor(), name);
     if (std::strcmp(name, SPC_SDR_DIRECT_SAMPLING) == 0) {
         const ModelCaps* p = active_profile(s);
         if (!p || !p->direct_sampling) {
+            if (value->enum_val.value == s->direct_sampling) return SPC_ERR_NOT_FOUND;
             SPC_LOG_WARN(&s->host.cached_log,
                 "NESDR: %s has no wired Q-branch, so direct sampling would tune to "
                 "nothing — ignoring. Use an upconverter for HF on this model",
                 p ? p->label : "this device");
+            s->host.set_choice(param, s->direct_sampling);
             return SPC_ERR_NOT_FOUND;
         }
         if (!spc::try_set_enum(name, value, SPC_SDR_DIRECT_SAMPLING, s->direct_sampling))
@@ -576,9 +588,11 @@ static int set_parameter(SpcPluginInstance* inst, const char* name,
             // Not a harmless no-op to swallow: on an R820T/R828D librtlsdr
             // routes this call straight to the bias tee, so honouring it would
             // put voltage on the antenna port.
+            if (value->bool_val.value == s->offset_tuning) return SPC_ERR_NOT_FOUND;
             SPC_LOG_WARN(&s->host.cached_log,
                 "NESDR: offset tuning is not available on %s — ignoring",
                 p ? p->label : "this device");
+            s->host.set_int(param, s->offset_tuning);
             return SPC_ERR_NOT_FOUND;
         }
         if (!spc::try_set_bool(name, value, "offset_tuning", s->offset_tuning))
@@ -589,12 +603,15 @@ static int set_parameter(SpcPluginInstance* inst, const char* name,
     if (std::strcmp(name, SPC_SDR_BIAS_TEE) == 0) {
         const ModelCaps* p = active_profile(s);
         if (!p || p->bias == BiasTee::None) {
+            if (value->bool_val.value == s->bias_tee) return SPC_ERR_NOT_FOUND;
             SPC_LOG_WARN(&s->host.cached_log, "NESDR: %s has no bias tee — ignoring",
                          p ? p->label : "this device");
+            s->host.set_int(param, s->bias_tee);
             return SPC_ERR_NOT_FOUND;
         }
         if (p->bias == BiasTee::AlwaysOn) {
             s->bias_tee = 1;  // hardware-powered whenever the dongle is
+            if (!value->bool_val.value) s->host.set_int(param, 1);
             return 0;
         }
         if (!spc::try_set_bool(name, value, SPC_SDR_BIAS_TEE, s->bias_tee))
@@ -604,7 +621,10 @@ static int set_parameter(SpcPluginInstance* inst, const char* name,
     }
     if (std::strcmp(name, SPC_SDR_DITHERING) == 0) {
         const ModelCaps* p = active_profile(s);
-        if (!p || !p->dithering) return SPC_ERR_NOT_FOUND;
+        if (!p || !p->dithering) {
+            if (value->bool_val.value != s->dithering) s->host.set_int(param, s->dithering);
+            return SPC_ERR_NOT_FOUND;
+        }
         if (!spc::try_set_bool(name, value, SPC_SDR_DITHERING, s->dithering))
             return SPC_ERR_INVALID;
         if (live) {
@@ -615,7 +635,15 @@ static int set_parameter(SpcPluginInstance* inst, const char* name,
     }
     if (std::strcmp(name, "if_gain_stage") == 0 || std::strcmp(name, "if_gain") == 0) {
         const ModelCaps* p = active_profile(s);
-        if (!p || p->tuner != Tuner::E4000) return SPC_ERR_NOT_FOUND;
+        if (!p || p->tuner != Tuner::E4000) {
+            if (value->type == SPC_PARAM_ENUM) {
+                if (value->enum_val.value != s->if_gain_stage)
+                    s->host.set_choice(param, s->if_gain_stage);
+            } else if (value->int_val.value != s->if_gain) {
+                s->host.set_int(param, s->if_gain);
+            }
+            return SPC_ERR_NOT_FOUND;
+        }
         const bool ok = spc::try_set_enum(name, value, "if_gain_stage", s->if_gain_stage)
                      || spc::try_set_int(name, value, "if_gain", s->if_gain);
         if (!ok) return SPC_ERR_INVALID;
@@ -638,89 +666,29 @@ static int set_parameter(SpcPluginInstance* inst, const char* name,
     return SPC_ERR_NOT_FOUND;
 }
 
-static int get_parameter(SpcPluginInstance* inst, const char* name,
-                         SpcParameterDesc* out)
+static void param_rules(const SpcValue* values, uint32_t* states)
 {
-    auto* s = state(inst);
-    const ModelCaps* p = active_profile(s);
-    const bool no_dev = (s->device_idx == 0);
-    const bool agc_on = (s->agc_enabled != 0);
-    const bool e4000 = p && p->tuner == Tuner::E4000;
+    spc::ParamRules r(get_descriptor(), values, states);
+    // the first option is "None": the user must scan and pick a real device
+    const bool no_dev = r.choice("device") <= 0;
+    r.missing("device", no_dev);
+    for (const char* name : {SPC_SDR_CENTER_FREQ, SPC_SDR_SAMPLE_RATE, SPC_SDR_BANDWIDTH,
+                             SPC_SDR_AGC_ENABLED, SPC_SDR_DIRECT_SAMPLING, "offset_tuning",
+                             SPC_SDR_BIAS_TEE, SPC_SDR_FREQ_CORRECTION, SPC_SDR_DITHERING,
+                             "test_mode", "if_gain_stage", "if_gain"})
+        r.disable(name, no_dev);
+    r.disable(SPC_SDR_GAIN, no_dev || r.on(SPC_SDR_AGC_ENABLED));
+}
 
-    // dynamic device enum — populate labels from the registry
-    if (std::strcmp(name, "device") == 0) {
-        out->type = SPC_PARAM_ENUM;
-        out->enum_val.value = s->device_idx;
-        out->enum_val.count = g_registry.count;
-        for (int i = 0; i < g_registry.count; ++i)
-            std::strncpy(out->enum_val.labels[i], g_registry.devices[i].label, SPC_PARAM_ENUM_LABEL_MAX);
-        return 0;
-    }
-
-    if (spc::try_get_enum(name, out, "model", s->model_idx)) return 0;
-
-    // tuning
-    if (spc::try_get_int(name, out, SPC_SDR_CENTER_FREQ, s->center_freq)) {
-        if (no_dev) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-    if (spc::try_get_int(name, out, SPC_SDR_SAMPLE_RATE, s->sample_rate)) {
-        if (no_dev) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-    if (spc::try_get_int(name, out, SPC_SDR_BANDWIDTH, s->bandwidth)) {
-        if (no_dev) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-
-    // gain
-    if (spc::try_get_bool(name, out, SPC_SDR_AGC_ENABLED, s->agc_enabled)) {
-        if (no_dev) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-    if (spc::try_get_float(name, out, SPC_SDR_GAIN, s->gain_db)) {
-        if (no_dev || agc_on) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-
-    // hardware — each gated on what the resolved profile's board provides
-    if (spc::try_get_enum(name, out, SPC_SDR_DIRECT_SAMPLING, s->direct_sampling)) {
-        if (no_dev || !p || !p->direct_sampling) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-    if (spc::try_get_bool(name, out, "offset_tuning", s->offset_tuning)) {
-        if (no_dev || !p || !p->offset_tuning) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-    if (std::strcmp(name, SPC_SDR_BIAS_TEE) == 0) {
-        const bool always_on = p && p->bias == BiasTee::AlwaysOn;
-        out->type = SPC_PARAM_BOOL;
-        out->bool_val.value = always_on ? 1 : (s->bias_tee != 0 ? 1 : 0);
-        if (no_dev || !p || p->bias != BiasTee::Gpio) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-    if (spc::try_get_int(name, out, SPC_SDR_FREQ_CORRECTION, s->freq_correction)) {
-        if (no_dev) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-    if (spc::try_get_bool(name, out, SPC_SDR_DITHERING, s->dithering)) {
-        if (no_dev || !p || !p->dithering) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-    if (spc::try_get_bool(name, out, "test_mode", s->test_mode)) {
-        if (no_dev) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-    if (spc::try_get_enum(name, out, "if_gain_stage", s->if_gain_stage)) {
-        if (no_dev || !e4000) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-    if (spc::try_get_int(name, out, "if_gain", s->if_gain)) {
-        if (no_dev || !e4000) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-
-    return SPC_ERR_NOT_FOUND;
+static int list_options(uint32_t param, const SpcValue*, int refresh,
+                        const SpcHostServices* host_services,
+                        SpcOptionSinkFn sink, void* sink_ctx)
+{
+    if (param != spc::param_index(get_descriptor(), "device")) return SPC_ERR_NOT_FOUND;
+    if (refresh) scan_devices(host_services);
+    for (int i = 0; i < g_registry.count; ++i)
+        sink(sink_ctx, g_registry.ids[i], g_registry.devices[i].label);
+    return SPC_OK;
 }
 
 // ── streaming ───────────────────────────────────────────────────────
@@ -796,6 +764,7 @@ static int start(SpcPluginInstance* inst)
     }
 
     confirm_profile(s);
+    show_profile(s);
     const ModelCaps* p = s->profile;
 
     s->gain_count = s->device->query_tuner_gains(s->gains, 64);
@@ -849,6 +818,7 @@ static int stop(SpcPluginInstance* inst)
         s->device.reset();
     }
     s->profile = nullptr;  // re-resolve on the next start
+    show_profile(s);
     SPC_LOG_INFO(&s->host.cached_log, "NESDR stopped (%llu samples)",
                  static_cast<unsigned long long>(s->sample_count));
     return 0;
@@ -910,29 +880,18 @@ static int process(SpcPluginInstance* inst, const SpcData*, uint32_t,
     return 0;
 }
 
-// ── mandatory-parameter validation ──────────────────────────────────
-// Device index 0 is the "None" placeholder; the user must scan and pick a real
-// device before starting.
-static int validate_mandatory(SpcPluginInstance* inst, SpcMissingParams* out)
-{
-    auto* s = state(inst);
-    if (s->device_idx <= 0) spc::add_missing(*out, "device");
-    return 0;
-}
-
 // ── export ──────────────────────────────────────────────────────────
 
 SPC_PLUGIN_VTABLE(
     .get_descriptor     = get_descriptor,
     .create_instance    = create_instance,
     .destroy_instance   = destroy_instance,
-    .set_parameter      = set_parameter,
-    .get_parameter      = get_parameter,
+    .params_changed    = spc::params_by_name<get_descriptor, set_parameter>,
+    .param_rules        = param_rules,
+    .list_options       = list_options,
     .process            = process,
     .start              = start,
     .stop               = stop,
     .set_host_services  = set_host_services,
-    .scan_devices       = scan_devices,
-    .validate_mandatory = validate_mandatory,
     .request_stop       = request_stop
 )
