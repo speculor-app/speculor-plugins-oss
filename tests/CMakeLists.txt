@@ -30,6 +30,8 @@ spc_add_plugin_test(spc_plugin_conformance
     SOURCES conformance_runner.cpp
     PLUGINS ${_present}
 )
+# Lends a GPU plugin the machine's device, as the engine does.
+spc_enable_gpu(spc_plugin_conformance)
 
 foreach(_p ${_present})
     add_test(NAME conformance.${_p}

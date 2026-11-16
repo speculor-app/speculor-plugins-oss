@@ -11,7 +11,7 @@
 
 #ifdef SPC_HAS_VULKAN
 #include <gpu/vulkan_context.h>
-#include <gpu/gpu_buffer_registry.h>
+#include <gpu/gpu_host.h>
 #include <gpu/gpu_output_handle.h>
 #include <gpu/gpu_failure_tracker.h>
 #include "vibe_gpu_pipeline.h"
@@ -149,7 +149,7 @@ static bool try_init_gpu(VibeBgsState* s)
     if (s->gpu_init_attempted) return s->gpu_available;
     s->gpu_init_attempted = true;
 
-    s->gpu_ctx = spc::gpu::VulkanContext::get_shared();
+    s->gpu_ctx = spc::gpu::context_from_host(s->host.svc);
     if (!s->gpu_ctx)
     {
         SPC_LOG_WARN(&s->host.cached_log, "ViBe GPU: no Vulkan device found, falling back to CPU");
@@ -496,7 +496,7 @@ static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
                         (in_frame->gpu_flags & SPC_GPU_FLAG_RESIDENT);
     VkBuffer gpu_input_buf = VK_NULL_HANDLE;
     if (input_on_gpu) {
-        auto entry = spc::gpu::GpuBufferRegistry::instance().lookup(in_frame->gpu_handle);
+        auto entry = spc::gpu::buffer_from_host(s->host.svc, in_frame->gpu_handle);
         if (entry.buffer != VK_NULL_HANDLE) gpu_input_buf = entry.buffer;
     }
 

@@ -10,6 +10,10 @@
 #include <testing/conformance.h>
 #include <testing/plugin_under_test.h>
 
+#ifdef SPC_HAS_VULKAN
+#include <gpu/gpu_host.h>
+#endif
+
 #include <cstdio>
 
 int main(int argc, char** argv) {
@@ -28,7 +32,21 @@ int main(int argc, char** argv) {
     const auto* d = plugin.descriptor();
     std::printf("plugin: %s (%s)\n", d && d->id[0] ? d->id : "<no id>", path);
 
-    const auto report = spc::testing::run_conformance(plugin);
+#ifdef SPC_HAS_VULKAN
+    // A plugin that computes on the GPU is lent this machine's, as the engine
+    // would, so its GPU start-up is part of what conformance runs.
+    std::shared_ptr<spc::gpu::VulkanContext> gpu;
+    const uint32_t gpu_caps = SPC_CAP_GPU_COMPUTE | SPC_CAP_GPU_OWN_SUBMIT | SPC_CAP_GPU_OWN_API;
+    if (d && (d->caps & gpu_caps)) gpu = spc::gpu::VulkanContext::get_shared();
+#endif
+    const auto report = spc::testing::run_conformance(
+        plugin, spc::testing::kProcessBound, [&](spc::testing::FakeHost& host) {
+#ifdef SPC_HAS_VULKAN
+            if (gpu) host.lend_gpu(spc::gpu::host_device(*gpu), &spc::gpu::host_buffer);
+#else
+            (void)host;
+#endif
+        });
     std::printf("%s\n", report.summary().c_str());
     return report.ok() ? 0 : 1;
 }
