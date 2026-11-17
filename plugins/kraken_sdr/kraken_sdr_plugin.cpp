@@ -111,8 +111,6 @@ struct KrakenSdrState {
 
     double actual_sample_rate = 2400000.0;
 
-    // output — one I/Q table per channel port
-    SpcTable tables[NUM_CH] = {};
     uint64_t block_index = 0;
     bool streaming = false;
 
@@ -272,10 +270,6 @@ static SpcPluginInstance* create_instance()
 {
     auto* s = new KrakenSdrState{};
 
-    auto* desc = get_descriptor();
-    for (int k = 0; k < NUM_CH; ++k)
-        spc::sdr::init_iq_table(s->tables[k], &desc->ports[k].schema);
-
     return reinterpret_cast<SpcPluginInstance*>(s);
 }
 
@@ -291,8 +285,6 @@ static void destroy_instance(SpcPluginInstance* inst)
 {
     auto* s = state(inst);
     close_all(s);
-    for (int k = 0; k < NUM_CH; ++k)
-        spc_table_free(&s->tables[k]);
     delete s;
 }
 
@@ -925,19 +917,20 @@ static int process(SpcPluginInstance* inst, const SpcData*, uint32_t,
     auto ts = spc::clock::now_utc_ns(s->host);
 
     for (int k = 0; k < NUM_CH; ++k) {
-        if (spc_table_resize(&s->tables[k], BATCH_SIZE) != 0) return -1;
+        SpcTable* out = s->host.table(static_cast<uint32_t>(k), BATCH_SIZE);
+        if (!out) return -1;
         if (s->zero_fill[k]) {
-            std::memset(s->tables[k].data, 0,
+            std::memset(out->data, 0,
                         static_cast<size_t>(BATCH_SIZE) * sizeof(int16_t) * 2);
         } else {
-            s->devices[k]->read_iq(reinterpret_cast<int16_t*>(s->tables[k].data), BATCH_SIZE);
+            s->devices[k]->read_iq(reinterpret_cast<int16_t*>(out->data), BATCH_SIZE);
             s->read_last[k] = true;
 
             // strided rail scan: every 16th sample (I and Q), ~4k checks per
             // 65536-sample block — statistically ample, cost negligible.
             // 8-bit rails after the (x-128)*256 conversion are -32768 / 32512.
             if (!s->cal_gain_active) {
-                const auto* iq = reinterpret_cast<const int16_t*>(s->tables[k].data);
+                const auto* iq = reinterpret_cast<const int16_t*>(out->data);
                 uint32_t hits = 0;
                 for (uint32_t i = 0; i < BATCH_SIZE; i += 16) {
                     const int16_t vi = iq[i * 2], vq = iq[i * 2 + 1];
@@ -952,7 +945,7 @@ static int process(SpcPluginInstance* inst, const SpcData*, uint32_t,
         // shared metadata + shared frame_number/timestamp so a downstream
         // correlator can pair reference/surveillance samples of the same block
         spc::sdr::set_iq_metadata(
-            s->tables[k],
+            *out,
             s->actual_sample_rate,
             static_cast<double>(s->center_freq),
             s->actual_sample_rate,                                   // bandwidth ≈ sample rate
@@ -963,7 +956,7 @@ static int process(SpcPluginInstance* inst, const SpcData*, uint32_t,
             ts);
 
         outputs[k].type = SPC_DATA_SIGNAL;
-        outputs[k].table = &s->tables[k];
+        outputs[k].table = out;
     }
 
     ++s->block_index;

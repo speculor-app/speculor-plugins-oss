@@ -619,7 +619,7 @@ struct MapDisplayState
     int32_t applied_map_style = MAP_STYLE_DARK;
     char applied_custom_server[SPC_PARAM_STRING_MAX] = "";
 
-    // cached input field offsets (aircraft table)
+    // input field offsets of the aircraft table being read
     uint32_t off_icao = 0, off_callsign = 0;
     uint32_t off_alt = 0, off_gs = 0, off_track = 0;
     uint32_t off_lat = 0, off_lon = 0;
@@ -634,11 +634,6 @@ struct MapDisplayState
     uint32_t off_msg_source = 0, off_spi = 0, off_alert = 0;
     uint32_t off_registration = 0, off_type_code = 0;
     uint32_t off_airline_icao = 0, off_origin_icao = 0, off_dest_icao = 0;
-    bool offsets_resolved = false;
-
-    // cached input field offsets (gps table)
-    uint32_t off_gps_lat = 0, off_gps_lon = 0;
-    bool gps_offsets_resolved = false;
 
     // cached GPS position (persists across frames when GPS data is sparse)
     double cached_gps_lat = 0.0;

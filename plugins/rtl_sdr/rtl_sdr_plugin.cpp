@@ -125,7 +125,6 @@ struct RtlSdrState {
     double actual_sample_rate = 2048000.0;
 
     // output
-    SpcTable output_table{};
     std::vector<int16_t> batch_buffer;
     uint64_t sample_count = 0;
     bool streaming = false;
@@ -296,9 +295,6 @@ static SpcPluginInstance* create_instance()
     auto* s = new RtlSdrState{};
     s->batch_buffer.resize(8192 * 2);
 
-    auto* desc = get_descriptor();
-    spc::sdr::init_iq_table(s->output_table, &desc->ports[0].schema);
-
     return reinterpret_cast<SpcPluginInstance*>(s);
 }
 
@@ -306,7 +302,6 @@ static void destroy_instance(SpcPluginInstance* inst)
 {
     auto* s = state(inst);
     s->device.reset();
-    spc_table_free(&s->output_table);
     delete s;
 }
 
@@ -542,14 +537,15 @@ static int process(SpcPluginInstance* inst, const SpcData*, uint32_t,
         return 0;
     }
 
-    if (spc_table_resize(&s->output_table, batch) != 0) return -1;
-    std::memcpy(s->output_table.data, s->batch_buffer.data(),
+    SpcTable* out = s->host.table(0, batch);
+    if (!out) return -1;
+    std::memcpy(out->data, s->batch_buffer.data(),
                 static_cast<size_t>(batch) * 4);
 
     auto ts = spc::clock::now_utc_ns(s->host);
 
     spc::sdr::set_iq_metadata(
-        s->output_table,
+        *out,
         s->actual_sample_rate,
         static_cast<double>(s->center_freq),
         s->actual_sample_rate, // bandwidth ≈ sample rate for RTL-SDR
@@ -561,7 +557,7 @@ static int process(SpcPluginInstance* inst, const SpcData*, uint32_t,
     );
 
     outputs[0].type = SPC_DATA_SIGNAL;
-    outputs[0].table = &s->output_table;
+    outputs[0].table = out;
 
     s->sample_count += batch;
     return 0;

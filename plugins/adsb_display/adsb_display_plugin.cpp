@@ -34,6 +34,7 @@ SPC_PLUGIN_DESCRIPTOR(
         .description("Renders ADS-B aircraft positions on an OpenStreetMap tile map")
         .maturity(SPC_MATURITY_STABLE)
         .tags({"ads-b", "tracking"})
+        // field order is mirrored by AircraftField / GpsField in input_parser.cpp
         .input_table("aircraft_in", "Aircraft", {
             {"icao_addr",       SPC_FIELD_UINT32},
             {"callsign",        SPC_FIELD_STRING32},
@@ -465,8 +466,6 @@ static int start(SpcPluginInstance* inst)
     auto* s = state(inst);
     const Params p = s->params.snapshot();
     s->frame_number = 0;
-    s->offsets_resolved = false;
-    s->gps_offsets_resolved = false;
     s->trail_history.trails.clear();
     s->trail_history.max_length = p.trail_length;
     s->cached_aircraft.clear();

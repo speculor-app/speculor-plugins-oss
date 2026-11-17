@@ -1,6 +1,6 @@
 #pragma once
 
-// Input-side helpers: schema-offset caching, table row -> AircraftView
+// Input-side helpers: field offsets, table row -> AircraftView
 // conversion, GPS position extraction, and enrichment-record parsing.
 
 #include <speculor/plugin_api.h>
@@ -11,8 +11,8 @@
 struct MapDisplayState;
 struct AircraftView;
 
-// Resolve and cache every aircraft-table field offset we care about.
-// No-op after the first successful resolution (guarded by s->offsets_resolved).
+// Take every aircraft-table field offset we care about from tbl->field_offsets.
+// Called for each table: offsets can differ from one table to the next.
 void resolve_offsets(MapDisplayState* s, const SpcTable* tbl);
 
 // Read GPS position from the third input table (port 2). Returns true if
