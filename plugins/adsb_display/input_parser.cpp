@@ -13,43 +13,56 @@
 #include <format>
 #include <vector>
 
+// aircraft_in fields, in the order the descriptor declares them
+enum AircraftField : uint32_t {
+    IN_ICAO_ADDR, IN_CALLSIGN, IN_ALT_BARO, IN_ALT_GEOM, IN_GROUND_SPEED, IN_IAS, IN_TAS,
+    IN_MACH, IN_TRACK, IN_TRACK_RATE, IN_MAG_HEADING, IN_TRUE_HEADING, IN_ROLL, IN_BARO_RATE,
+    IN_GEOM_RATE, IN_LATITUDE, IN_LONGITUDE, IN_NAV_ALT_MCP, IN_NAV_ALT_FMS, IN_NAV_HEADING,
+    IN_NAV_QNH, IN_SQUAWK, IN_CATEGORY, IN_EMERGENCY, IN_SPI, IN_ALERT, IN_IS_ON_GROUND,
+    IN_NIC, IN_NAC_P, IN_NAC_V, IN_SIL, IN_NIC_BARO, IN_GVA, IN_SDA, IN_DB_FLAGS, IN_MSG_SOURCE,
+    IN_ADSB_VERSION, IN_RSSI, IN_MSG_COUNT, IN_SEEN, IN_SEEN_POS, IN_RC, IN_REGISTRATION,
+    IN_TYPE_CODE, IN_AIRLINE_ICAO, IN_ORIGIN_ICAO, IN_DEST_ICAO,
+};
+
+// gps_in fields, in the order the descriptor declares them
+enum GpsField : uint32_t { IN_GPS_LATITUDE, IN_GPS_LONGITUDE };
+
 void resolve_offsets(MapDisplayState* s, const SpcTable* tbl)
 {
-    if (s->offsets_resolved || !tbl->schema) return;
-    s->off_icao      = spc_schema_field_offset(tbl->schema, "icao_addr");
-    s->off_callsign  = spc_schema_field_offset(tbl->schema, "callsign");
-    s->off_alt       = spc_schema_field_offset(tbl->schema, "alt_baro");
-    s->off_gs        = spc_schema_field_offset(tbl->schema, "ground_speed");
-    s->off_track     = spc_schema_field_offset(tbl->schema, "track");
-    s->off_lat       = spc_schema_field_offset(tbl->schema, "latitude");
-    s->off_lon       = spc_schema_field_offset(tbl->schema, "longitude");
-    s->off_ground    = spc_schema_field_offset(tbl->schema, "is_on_ground");
-    s->off_category  = spc_schema_field_offset(tbl->schema, "category");
-    s->off_db_flags  = spc_schema_field_offset(tbl->schema, "db_flags");
-    s->off_emergency = spc_schema_field_offset(tbl->schema, "emergency");
-    s->off_squawk    = spc_schema_field_offset(tbl->schema, "squawk");
-    s->off_rssi      = spc_schema_field_offset(tbl->schema, "rssi");
-    s->off_seen      = spc_schema_field_offset(tbl->schema, "seen");
-    s->off_seen_pos  = spc_schema_field_offset(tbl->schema, "seen_pos");
-    s->off_msg_count = spc_schema_field_offset(tbl->schema, "msg_count");
-    s->off_ias       = spc_schema_field_offset(tbl->schema, "ias");
-    s->off_tas       = spc_schema_field_offset(tbl->schema, "tas");
-    s->off_mach      = spc_schema_field_offset(tbl->schema, "mach");
-    s->off_mag_heading  = spc_schema_field_offset(tbl->schema, "mag_heading");
-    s->off_true_heading = spc_schema_field_offset(tbl->schema, "true_heading");
-    s->off_baro_rate = spc_schema_field_offset(tbl->schema, "baro_rate");
-    s->off_geom_rate = spc_schema_field_offset(tbl->schema, "geom_rate");
-    s->off_nav_alt_mcp = spc_schema_field_offset(tbl->schema, "nav_alt_mcp");
-    s->off_nav_alt_fms = spc_schema_field_offset(tbl->schema, "nav_alt_fms");
-    s->off_msg_source = spc_schema_field_offset(tbl->schema, "msg_source");
-    s->off_spi       = spc_schema_field_offset(tbl->schema, "spi");
-    s->off_alert     = spc_schema_field_offset(tbl->schema, "alert");
-    s->off_registration = spc_schema_field_offset(tbl->schema, "registration");
-    s->off_type_code = spc_schema_field_offset(tbl->schema, "type_code");
-    s->off_airline_icao = spc_schema_field_offset(tbl->schema, "airline_icao");
-    s->off_origin_icao  = spc_schema_field_offset(tbl->schema, "origin_icao");
-    s->off_dest_icao    = spc_schema_field_offset(tbl->schema, "dest_icao");
-    s->offsets_resolved = true;
+    const uint32_t* off = tbl->field_offsets;
+    s->off_icao      = off[IN_ICAO_ADDR];
+    s->off_callsign  = off[IN_CALLSIGN];
+    s->off_alt       = off[IN_ALT_BARO];
+    s->off_gs        = off[IN_GROUND_SPEED];
+    s->off_track     = off[IN_TRACK];
+    s->off_lat       = off[IN_LATITUDE];
+    s->off_lon       = off[IN_LONGITUDE];
+    s->off_ground    = off[IN_IS_ON_GROUND];
+    s->off_category  = off[IN_CATEGORY];
+    s->off_db_flags  = off[IN_DB_FLAGS];
+    s->off_emergency = off[IN_EMERGENCY];
+    s->off_squawk    = off[IN_SQUAWK];
+    s->off_rssi      = off[IN_RSSI];
+    s->off_seen      = off[IN_SEEN];
+    s->off_seen_pos  = off[IN_SEEN_POS];
+    s->off_msg_count = off[IN_MSG_COUNT];
+    s->off_ias       = off[IN_IAS];
+    s->off_tas       = off[IN_TAS];
+    s->off_mach      = off[IN_MACH];
+    s->off_mag_heading  = off[IN_MAG_HEADING];
+    s->off_true_heading = off[IN_TRUE_HEADING];
+    s->off_baro_rate = off[IN_BARO_RATE];
+    s->off_geom_rate = off[IN_GEOM_RATE];
+    s->off_nav_alt_mcp = off[IN_NAV_ALT_MCP];
+    s->off_nav_alt_fms = off[IN_NAV_ALT_FMS];
+    s->off_msg_source = off[IN_MSG_SOURCE];
+    s->off_spi       = off[IN_SPI];
+    s->off_alert     = off[IN_ALERT];
+    s->off_registration = off[IN_REGISTRATION];
+    s->off_type_code = off[IN_TYPE_CODE];
+    s->off_airline_icao = off[IN_AIRLINE_ICAO];
+    s->off_origin_icao  = off[IN_ORIGIN_ICAO];
+    s->off_dest_icao    = off[IN_DEST_ICAO];
 }
 
 bool read_gps_position(MapDisplayState* s, const SpcData* inputs,
@@ -62,17 +75,13 @@ bool read_gps_position(MapDisplayState* s, const SpcData* inputs,
     const SpcTable* tbl = inputs[2].table;
     if (tbl->record_count == 0) return false;
 
-    if (!s->gps_offsets_resolved && tbl->schema) {
-        s->off_gps_lat = spc_schema_field_offset(tbl->schema, "latitude");
-        s->off_gps_lon = spc_schema_field_offset(tbl->schema, "longitude");
-        s->gps_offsets_resolved = true;
-    }
-
-    if (s->off_gps_lat == UINT32_MAX || s->off_gps_lon == UINT32_MAX)
+    const uint32_t off_lat = tbl->field_offsets[IN_GPS_LATITUDE];
+    const uint32_t off_lon = tbl->field_offsets[IN_GPS_LONGITUDE];
+    if (off_lat == SPC_NO_FIELD || off_lon == SPC_NO_FIELD)
         return false;
 
-    gps_lat = spc_table_get_float64(tbl, 0, s->off_gps_lat);
-    gps_lon = spc_table_get_float64(tbl, 0, s->off_gps_lon);
+    gps_lat = spc_table_get_float64(tbl, 0, off_lat);
+    gps_lon = spc_table_get_float64(tbl, 0, off_lon);
 
     // reject null island and out-of-range coords
     if (gps_lat == 0.0 && gps_lon == 0.0) return false;
