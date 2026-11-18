@@ -126,3 +126,31 @@ if(TARGET adsb_display)
     set_tests_properties(display.adsb_display PROPERTIES TIMEOUT 120)
     message(STATUS "[tests] display registered for: adsb_display")
 endif()
+
+# On Windows a test only finds the libraries the plugins need (the SDK's, the
+# app's, the vendor DLLs beside a bundle) when their folders are on PATH: the
+# engine adds them with AddDllDirectory, a test calling LoadLibrary cannot, and
+# a missing one stalls on a system error dialog until the test times out. The
+# same folders speculor-plugins' tests use: the one that holds the plugins
+# folder, and each plugin's vendor folder. POSIX finds them through the RPATH
+# spc_add_plugin bakes in.
+if(WIN32)
+    get_filename_component(_spc_runtime_dir "${SPC_PLUGIN_OUTPUT_DIR}" DIRECTORY)
+    set(_spc_dll_dirs "${_spc_runtime_dir}")
+    foreach(_p ${_present})
+        get_target_property(_spc_outdir ${_p} LIBRARY_OUTPUT_DIRECTORY)
+        if(_spc_outdir)
+            list(APPEND _spc_dll_dirs "${_spc_outdir}/vendor")
+        endif()
+    endforeach()
+    list(REMOVE_DUPLICATES _spc_dll_dirs)
+    set(_spc_dll_path_ops "")
+    foreach(_d ${_spc_dll_dirs})
+        file(TO_NATIVE_PATH "${_d}" _d_native)
+        list(APPEND _spc_dll_path_ops "PATH=path_list_prepend:${_d_native}")
+    endforeach()
+    get_property(_spc_tests DIRECTORY PROPERTY TESTS)
+    foreach(_t ${_spc_tests})
+        set_tests_properties(${_t} PROPERTIES ENVIRONMENT_MODIFICATION "${_spc_dll_path_ops}")
+    endforeach()
+endif()
