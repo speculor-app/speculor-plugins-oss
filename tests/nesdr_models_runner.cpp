@@ -208,6 +208,8 @@ int main(int argc, char** argv) {
     spc::testing::FakeHost host;
     host.serve_params(plugin.params());
     plugin.set_host_services(host.services());
+    // the plugin gates its parameters by model itself, so only while it runs
+    check(plugin.start() == 0, "start() with no device");
 
     // --- per-model capability gating ----------------------------------------
     int matched = 0;
