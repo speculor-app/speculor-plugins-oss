@@ -28,7 +28,7 @@ void check(bool cond, const std::string& what) {
     if (!cond) ++failures;
 }
 
-const SpcParameterDesc* find_param(const SpcPluginDescriptor* d, const char* name) {
+const SpcParam* find_param(const SpcPluginDescriptor* d, const char* name) {
     if (!d) return nullptr;
     for (uint32_t i = 0; i < d->param_count && i < SPC_PLUGIN_PARAM_MAX; ++i) {
         if (std::strcmp(d->params[i].name, name) == 0) return &d->params[i];

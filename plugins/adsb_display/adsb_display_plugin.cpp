@@ -412,8 +412,9 @@ void push_waypoints(MapDisplayState* s)
             rows[i].cells[4].float64_val = s->waypoints[i].alt;
         }
     }
-    s->host.set_list(param, desc->list_schemas[desc->params[param].list_val.schema_index],
-                     rows.data(), static_cast<int32_t>(rows.size()));
+    SpcListSchema schema;
+    spc::list_schema_of(desc->params[param], schema);
+    s->host.set_list(param, schema, rows.data(), static_cast<int32_t>(rows.size()));
 }
 
 static int set_list_rows_impl(MapDisplayState* s, const char* name,
