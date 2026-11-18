@@ -135,7 +135,7 @@ SPC_PLUGIN_HOST_SERVICES(RtlSdrState, host)
 
 // ── descriptor & device scan ────────────────────────────────────────
 
-static SpcPluginDescriptor g_desc;
+static spc::DescriptorStorage g_desc;
 static bool g_desc_initialized = false;
 
 // Snap a requested dB gain to the nearest hardware-supported step and apply it.
@@ -285,7 +285,7 @@ static const SpcPluginDescriptor* get_descriptor()
         g_desc_initialized = true;
     }
 
-    return &g_desc;
+    return g_desc.get();
 }
 
 // ── lifecycle ───────────────────────────────────────────────────────

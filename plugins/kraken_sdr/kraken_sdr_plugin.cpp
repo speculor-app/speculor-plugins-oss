@@ -160,7 +160,7 @@ SPC_PLUGIN_HOST_SERVICES(KrakenSdrState, host)
 
 // ── descriptor ──────────────────────────────────────────────────────
 
-static SpcPluginDescriptor g_desc;
+static spc::DescriptorStorage g_desc;
 static bool g_desc_initialized = false;
 
 static void scan_devices(const SpcHostServices* svc)
@@ -261,7 +261,7 @@ static const SpcPluginDescriptor* get_descriptor()
         g_desc_initialized = true;
     }
 
-    return &g_desc;
+    return g_desc.get();
 }
 
 // ── lifecycle ───────────────────────────────────────────────────────
