@@ -177,13 +177,13 @@ static const ModelCaps* active_profile(const NesdrState* s)
 
 // ── descriptor & device scan ────────────────────────────────────────
 
-static SpcPluginDescriptor g_desc;
+static spc::DescriptorStorage g_desc;
 static bool g_desc_initialized = false;
 
 static SpcParameterDesc* find_param(const char* name)
 {
-    for (uint32_t i = 0; i < g_desc.param_count; ++i)
-        if (std::strcmp(g_desc.params[i].name, name) == 0) return &g_desc.params[i];
+    for (uint32_t i = 0; i < g_desc.param_count(); ++i)
+        if (std::strcmp(g_desc.param(i).name, name) == 0) return &g_desc.param(i);
     return nullptr;
 }
 
@@ -331,7 +331,7 @@ static const SpcPluginDescriptor* get_descriptor()
         g_desc_initialized = true;
     }
 
-    return &g_desc;
+    return g_desc.get();
 }
 
 // ── hardware application ────────────────────────────────────────────
