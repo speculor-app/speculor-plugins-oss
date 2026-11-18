@@ -5,7 +5,7 @@
 // right-click to add a waypoint, and delegation to the list panel
 // when the cursor is over it.
 
-#include <speculor/plugin_api.h>
+#include <speculor/plugin.h>
 
 #include <cstdint>
 
@@ -16,4 +16,4 @@ struct MapDisplayState;
 uint32_t hit_test_aircraft(MapDisplayState* s, float px_x, float px_y);
 
 // Main event entry point. Returns 0 if handled, -1 otherwise.
-int handle_event(MapDisplayState* s, const SpcInputEvent* event);
+int handle_event(MapDisplayState* s, const SpcUiInput* event);

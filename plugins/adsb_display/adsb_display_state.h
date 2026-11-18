@@ -650,7 +650,7 @@ struct MapDisplayState
     // a non-default sort is selected.
     std::vector<AircraftView> panel_aircraft;
 
-    // ── viewport (bidirectional: set_parameter + on_input_event + process) ───
+    // ── viewport (bidirectional: set_parameter + ui_input + process) ───
     // Atomic because the GUI thread, the event thread, and the worker all
     // read/write these. Cross-field tearing during a drag is cosmetic and
     // pre-existing — no mutex (matches the existing interactive_view etc).
@@ -670,18 +670,18 @@ struct MapDisplayState
     // tracked maximum distance — worker-owned (written in process)
     double max_range_km = 0.0;
 
-    uint64_t frame_number = 0;
+    uint64_t sequence = 0;
 
     // when true, compute_view uses center_lat/lon/zoom directly
-    // (set by on_input_event, cleared when user changes view_mode via parameter panel)
+    // (set by ui_input, cleared when user changes view_mode via parameter panel)
     std::atomic<bool> interactive_view{false};
 
-    // interactive state (updated by on_input_event, read by process)
+    // interactive state (updated by ui_input, read by process)
     std::atomic<bool> drag_active{false};
     float drag_start_x = 0.0f, drag_start_y = 0.0f;
     double drag_start_lat = 0.0, drag_start_lon = 0.0;
 
-    // last computed view (written by process, read by on_input_event for coord conversion)
+    // last computed view (written by process, read by ui_input for coord conversion)
     std::atomic<float> last_zoom{6.0f};
     std::atomic<double> last_origin_tx{0.0};
     std::atomic<double> last_origin_ty{0.0};

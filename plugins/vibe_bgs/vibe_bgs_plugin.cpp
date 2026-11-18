@@ -72,7 +72,7 @@ SPC_PLUGIN_HOST_SERVICES(VibeBgsState, host)
 SPC_PLUGIN_DESCRIPTOR(
     spc::DescriptorBuilder("vibe_bgs", "ViBe BGS", "Analysis/Motion")
         .author("Speculor").version("0.3.0")
-        .description("ViBe background subtraction — outputs foreground mask")
+        .help("ViBe background subtraction — outputs foreground mask")
         .maturity(SPC_MATURITY_STABLE)
         .tags({"image", "tracking", "surveillance"})
         .input("image_in", "Image", SPC_DATA_FRAME, 32, SPC_CONSUME_FIFO)
@@ -81,15 +81,14 @@ SPC_PLUGIN_DESCRIPTOR(
         .output("image_out", "Image", SPC_DATA_FRAME)
         .gpu_compute()
         .int_param("threshold", "Threshold", 1, 255, 27, 1, "ViBe")
-            .param_description("Pixel intensity difference to classify as foreground")
+            .param_help("Pixel intensity difference to classify as foreground")
         .int_param("bg_samples", "BG Samples", 2, 64, 16, 2, "ViBe")
-            .param_description("Number of background samples stored per pixel")
+            .param_help("Number of background samples stored per pixel")
         .int_param("required_bg_samples", "Required BG Samples", 1, 16, 1, 1, "ViBe")
-            .param_description("How many samples must match for a pixel to be classified as background")
+            .param_help("How many samples must match for a pixel to be classified as background")
         .int_param("learning_rate", "Learning Rate", 1, 32, 16, 1, "ViBe")
-            .param_description("Chance (1 in N) that a foreground pixel updates the background model — "
-                               "higher = slower absorption, keeps slow/hovering movers foreground longer")
-        .frame_alloc()
+            .param_help("Chance (1 in N) that a foreground pixel updates the background model — "
+                        "higher = slower absorption, keeps slow/hovering movers foreground longer")
 )
 
 // --- lifecycle ---
@@ -310,9 +309,12 @@ static bool mask_usable(VibeBgsState* s, uint32_t w, uint32_t h)
 
 // --- process ---
 
-static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t input_count,
-                   SpcData* outputs, uint32_t output_count)
+static int process(SpcPluginInstance* inst, SpcStep* step)
 {
+    const SpcData* inputs = step->inputs;
+    const uint32_t input_count = step->input_count;
+    SpcData* outputs = step->outputs;
+    const uint32_t output_count = step->output_count;
     auto* s = state(inst);
 
     // ensure spclib log bridge is installed on this (node) thread
@@ -323,7 +325,7 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t inpu
     }
 
     if (input_count < 1 || output_count < 2) return -1;
-    if (inputs[0].type != SPC_DATA_FRAME || !inputs[0].frame) return SPC_NO_DATA;
+    if (inputs[0].type != SPC_DATA_FRAME || !inputs[0].frame) return SPC_SKIP;
 
     // apply any GUI-thread parameter change to the worker-owned detector
     if (s->params_dirty.exchange(false, std::memory_order_acquire))
@@ -353,7 +355,7 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t inpu
     auto h = static_cast<uint32_t>(in_frame->height);
     const bool use_mask = mask_usable(s, w, h);
 
-    SpcFrame* out = s->host.acquire_frame(0, w, h, SPC_PIXEL_FORMAT_GRAY8);
+    SpcFrame* out = s->host.frame(0, w, h, SPC_PIXEL_FORMAT_GRAY8);
     if (out)
     {
         // wrap pool buffer as Image — ViBe writes directly, no copy. A view
@@ -362,7 +364,7 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t inpu
         cv::Mat fg_mask(static_cast<int>(h), static_cast<int>(w), CV_8UC1, out->data);
         s->vibe->apply(s->input_image, fg_mask,
                        use_mask ? s->cached_mask : s->empty_mask);
-        out->frame_number = in_frame->frame_number;
+        out->sequence = in_frame->sequence;
         out->timestamp_ns = in_frame->timestamp_ns;
         outputs[0].type = SPC_DATA_FRAME;
         outputs[0].frame = out;
@@ -376,7 +378,7 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t inpu
                    use_mask ? s->cached_mask : s->empty_mask);
     const cv::Mat& fg_mat = s->fg_mask;
     spc::mat_to_frame(fg_mat, &s->output_frame, SPC_PIXEL_FORMAT_GRAY8,
-                     in_frame->frame_number, in_frame->timestamp_ns);
+                     in_frame->sequence, in_frame->timestamp_ns);
     outputs[0].type = SPC_DATA_FRAME;
     outputs[0].frame = &s->output_frame;
     outputs[1].type = SPC_DATA_FRAME;
@@ -410,15 +412,15 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t inpu
 // rotates with the executor's shared per-frame counter, so frame N's upload
 // can't clobber a slot a prior in-flight submit is still reading — this is the
 // last write hazard that K=2 closes on the vibe→dual_morph chain.
-static bool acquire_input_upload(VibeBgsState* s, SpcGpuRecordCtx* rctx,
+static bool acquire_input_upload(VibeBgsState* s, SpcGpuPass* pass,
                                  const SpcFrame* in_frame, uint32_t frame_size,
                                  VkBuffer& in_device, VkBuffer& in_staging)
 {
     in_device = VK_NULL_HANDLE;
     in_staging = VK_NULL_HANDLE;
-    if (!rctx->edge_ring_ctx) return false;
-    SpcGpuEdgeBuffer up = s->host.acquire_ringed_upload(
-        rctx->edge_ring_ctx, 0,
+    if (!pass) return false;
+    SpcGpuEdgeBuffer up = spc::acquire_ringed_upload(
+        pass, 0,
         static_cast<uint64_t>(s->gpu_pipeline->input_device_size()),
         static_cast<uint64_t>(frame_size));
     if (!up.device_buffer || !up.staging_buffer || !up.staging_mapped) return false;
@@ -428,25 +430,25 @@ static bool acquire_input_upload(VibeBgsState* s, SpcGpuRecordCtx* rctx,
     return true;
 }
 
-static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
+static int record_gpu(SpcPluginInstance* inst, SpcStep* step, SpcGpuPass* pass)
 {
     auto* s = state(inst);
-    if (!rctx) return -1;
-    if (rctx->input_count < 1 || rctx->output_count < 2) return -1;
-    if (rctx->inputs[0].type != SPC_DATA_FRAME || !rctx->inputs[0].frame) return -1;
+    if (!step || !pass) return -1;
+    if (step->input_count < 1 || step->output_count < 2) return -1;
+    if (step->inputs[0].type != SPC_DATA_FRAME || !step->inputs[0].frame) return -1;
     if (!s->gpu_available || !s->gpu_ctx || !s->gpu_pipeline) return -1;
 
     const Params p = s->params.snapshot();  // one consistent view per frame
 
-    const SpcFrame* in_frame = rctx->inputs[0].frame;
+    const SpcFrame* in_frame = step->inputs[0].frame;
     int cv_type = spc::cv_type_for_format(in_frame->format);
     if (cv_type < 0) return -1;
 
     // Update cached detection mask from input port 1 (same as process()); flag
     // the GPU buffer for re-upload only when the mask actually changed, so the
     // pipeline doesn't re-push an identical mask every frame.
-    if (rctx->input_count > 1 && rctx->inputs[1].type == SPC_DATA_FRAME && rctx->inputs[1].frame) {
-        if (cache_detect_mask(s, rctx->inputs[1].frame))
+    if (step->input_count > 1 && step->inputs[1].type == SPC_DATA_FRAME && step->inputs[1].frame) {
+        if (cache_detect_mask(s, step->inputs[1].frame))
             s->gpu_pipeline->mark_mask_dirty();
     }
 
@@ -469,7 +471,7 @@ static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
     }
 
     if (!s->gpu_pipeline->prepare(*s->gpu_ctx, w, h, num_channels, bytes_per_channel, p.bg_samples,
-                                  s->host.svc, rctx->edge_ring_ctx))
+                                  pass))
         return -1;
 
     uint32_t frame_size = w * h * static_cast<uint32_t>(num_channels) *
@@ -500,13 +502,13 @@ static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
     pc.bg_samples_and = static_cast<int32_t>(bg_p2 > 1 ? bg_p2 - 1 : 1);
     pc.learning_rate_and = static_cast<int32_t>(lr_p2 > 1 ? lr_p2 - 1 : 0);
     pc.bg_samples = static_cast<int32_t>(bg_p2 > 1 ? bg_p2 : 2);
-    pc.frame_number = s->gpu_frame_counter++;
+    pc.sequence = s->gpu_frame_counter++;
     pc.bytes_per_channel = bytes_per_channel;
 
-    auto cmd = static_cast<VkCommandBuffer>(rctx->cmd_buffer_handle);
+    auto cmd = static_cast<VkCommandBuffer>(pass->cmd_buffer_handle);
     if (!cmd) return -1;
 
-    SpcFrame* out = s->host.acquire_frame(0, w, h, SPC_PIXEL_FORMAT_GRAY8);
+    SpcFrame* out = s->host.frame(0, w, h, SPC_PIXEL_FORMAT_GRAY8);
     if (!out) return -1;
 
     // Acquire the engine-owned OUTPUT ring slot for this frame (binding 2 +
@@ -517,9 +519,9 @@ static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
     // zeroed return (host predates edge rings / alloc failed) demotes to CPU.
     // Acquired for the init frame too so the init dispatch's binding 2 is a
     // valid buffer (the init shader doesn't write it, but it must be bound).
-    if (!rctx->edge_ring_ctx) { s->host.release_frame(out); return -1; }
-    SpcGpuEdgeBuffer outbuf = s->host.acquire_ringed_output(
-        rctx->edge_ring_ctx, 0, w, h, out->stride, SPC_PIXEL_FORMAT_GRAY8,
+    if (!pass) { s->host.release_frame(out); return -1; }
+    SpcGpuEdgeBuffer outbuf = spc::acquire_ringed_output(
+        pass, 0, w, h, out->stride, SPC_PIXEL_FORMAT_GRAY8,
         static_cast<uint64_t>(s->gpu_pipeline->output_device_size()),
         static_cast<uint64_t>(s->gpu_pipeline->output_staging_size()));
     // staging may be null — only the device buffer + registry handle are required
@@ -532,7 +534,7 @@ static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
     // GPU-resident input → device-to-device, no upload ring.
     VkBuffer in_device = VK_NULL_HANDLE, in_staging = VK_NULL_HANDLE;
     if (gpu_input_buf == VK_NULL_HANDLE &&
-        !acquire_input_upload(s, rctx, in_frame, frame_size, in_device, in_staging)) {
+        !acquire_input_upload(s, pass, in_frame, frame_size, in_device, in_staging)) {
         s->host.release_frame(out);
         return -1;
     }
@@ -552,12 +554,12 @@ static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
         }
         s->gpu_model_initialized = true;
         std::memset(out->data, 0, static_cast<size_t>(out->stride) * h);
-        out->frame_number = in_frame->frame_number;
+        out->sequence = in_frame->sequence;
         out->timestamp_ns = in_frame->timestamp_ns;
-        rctx->outputs[0].type = SPC_DATA_FRAME;
-        rctx->outputs[0].frame = out;
-        rctx->outputs[1].type = SPC_DATA_FRAME;
-        rctx->outputs[1].frame = const_cast<SpcFrame*>(in_frame);
+        step->outputs[0].type = SPC_DATA_FRAME;
+        step->outputs[0].frame = out;
+        step->outputs[1].type = SPC_DATA_FRAME;
+        step->outputs[1].frame = const_cast<SpcFrame*>(in_frame);
         return 0;
     }
 
@@ -567,8 +569,8 @@ static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
 
     SpcGpuEdgeBuffer mask_up{};
     if (det_mask)
-        mask_up = s->host.acquire_ringed_scratch(rctx->edge_ring_ctx, 0, SPC_GPU_SCRATCH_UPLOAD,
-                                                 static_cast<uint64_t>(s->gpu_pipeline->packed_mask_bytes()));
+        mask_up = spc::acquire_ringed_scratch(pass, 0, SPC_GPU_SCRATCH_UPLOAD,
+                                              static_cast<uint64_t>(s->gpu_pipeline->packed_mask_bytes()));
     if (!s->gpu_pipeline->record(*s->gpu_ctx, cmd,
                                   in_device, in_staging, frame_size,
                                   static_cast<VkBuffer>(outbuf.device_buffer),
@@ -584,19 +586,19 @@ static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
     // GpuOutputHandle::bind_to_frame set on the prior path).
     out->gpu_handle   = outbuf.gpu_handle;
     out->gpu_flags   |= SPC_GPU_FLAG_RESIDENT;
-    out->frame_number = in_frame->frame_number;
+    out->sequence     = in_frame->sequence;
     out->timestamp_ns = in_frame->timestamp_ns;
-    rctx->outputs[0].type = SPC_DATA_FRAME;
-    rctx->outputs[0].frame = out;
-    rctx->outputs[1].type = SPC_DATA_FRAME;
-    rctx->outputs[1].frame = const_cast<SpcFrame*>(in_frame);
+    step->outputs[0].type = SPC_DATA_FRAME;
+    step->outputs[0].frame = out;
+    step->outputs[1].type = SPC_DATA_FRAME;
+    step->outputs[1].frame = const_cast<SpcFrame*>(in_frame);
     return 0;
 }
 #endif
 
 #ifdef SPC_HAS_VULKAN
-SPC_PLUGIN_VTABLE(
-    .get_descriptor    = get_descriptor,
+SPC_EXPORT_PLUGIN(
+    .info              = get_descriptor,
     .create_instance   = create_instance,
     .destroy_instance  = destroy_instance,
     .params_changed    = spc::params_by_name<get_descriptor, set_parameter>,
@@ -607,8 +609,8 @@ SPC_PLUGIN_VTABLE(
     .record_gpu        = record_gpu
 )
 #else
-SPC_PLUGIN_VTABLE(
-    .get_descriptor    = get_descriptor,
+SPC_EXPORT_PLUGIN(
+    .info              = get_descriptor,
     .create_instance   = create_instance,
     .destroy_instance  = destroy_instance,
     .params_changed    = spc::params_by_name<get_descriptor, set_parameter>,

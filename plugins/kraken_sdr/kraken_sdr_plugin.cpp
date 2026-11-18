@@ -163,10 +163,10 @@ SPC_PLUGIN_HOST_SERVICES(KrakenSdrState, host)
 static spc::DescriptorStorage g_desc;
 static bool g_desc_initialized = false;
 
-static void scan_devices(const SpcHostServices* svc)
+static void scan_devices(SpcHost* svc)
 {
     SpcLogContext log{};
-    if (svc && svc->log) log = {svc->log, svc->host_ctx};
+    if (svc && svc->log) log = spc::log_context(svc);
 
     SPC_LOG_INFO(&log, "KrakenSDR: scanning for device...");
     g_registry.present = detect_kraken(false, g_registry.hw_index, &log);
@@ -179,16 +179,16 @@ static void scan_devices(const SpcHostServices* svc)
                            "(need 5 RTL-SDR dongles with serials 1000-1004)");
 }
 
-static const SpcPluginDescriptor* get_descriptor()
+static const SpcNodeInfo* get_descriptor()
 {
     if (!g_desc_initialized) {
         spc::DescriptorBuilder("kraken_sdr", "KrakenSDR", "Signal/SDR/Passive Radar/Sources")
             .author("Speculor").version("0.1.1")
-            .data_source()
-            .description("Streams five coherent I/Q channels from a KrakenSDR "
-                         "(5x R820T2 coherent RTL-SDR array). Frequency-coherent "
-                         "capture for passive radar / beamforming — phase calibration "
-                         "is a downstream node.")
+            .source()
+            .help("Streams five coherent I/Q channels from a KrakenSDR "
+                  "(5x R820T2 coherent RTL-SDR array). Frequency-coherent "
+                  "capture for passive radar / beamforming — phase calibration "
+                  "is a downstream node.")
             .maturity(SPC_MATURITY_PREVIEW)
             .tags({"radio", "sdr", "passive-radar"})
             // five channel outputs; channel 0 = serial 1000 = reference dongle
@@ -205,56 +205,56 @@ static const SpcPluginDescriptor* get_descriptor()
             // Tuning (shared across all five tuners)
             .int_param(SPC_SDR_CENTER_FREQ, "Center Freq (Hz)",
                        24000000, 1766000000, 100000000, 1000, SPC_SDR_GROUP_TUNING)
-                .param_description("Shared receiver center frequency (24 MHz - 1.766 GHz)")
+                .param_help("Shared receiver center frequency (24 MHz - 1.766 GHz)")
             .int_param(SPC_SDR_SAMPLE_RATE, "Sample Rate (Hz)",
                        900001, 2560000, 2400000, 1000, SPC_SDR_GROUP_TUNING)
-                .param_description("Shared ADC sample rate; 2.4 MSPS is the Kraken max")
+                .param_help("Shared ADC sample rate; 2.4 MSPS is the Kraken max")
             .int_param(SPC_SDR_BANDWIDTH, "IF Bandwidth (Hz)",
                        0, 2560000, 0, 10000, SPC_SDR_GROUP_TUNING)
-                .param_description("Shared IF bandwidth (0 = automatic, matched to sample rate)")
+                .param_help("Shared IF bandwidth (0 = automatic, matched to sample rate)")
             // Gain (one universal gain applied identically to all five tuners)
             .bool_param(SPC_SDR_AGC_ENABLED, "AGC", false, SPC_SDR_GROUP_GAIN)
-                .param_description("Automatic gain control (leave off for coherent capture)")
+                .param_help("Automatic gain control (leave off for coherent capture)")
             .float_param(SPC_SDR_GAIN, "Manual Gain (dB)",
                          0.0f, 50.0f, 30.0f, 0.1f, SPC_SDR_GROUP_GAIN)
-                .param_description("Universal manual gain in dB, snapped to the nearest "
-                                   "hardware step and applied to all five tuners (active when AGC is off)")
+                .param_help("Universal manual gain in dB, snapped to the nearest "
+                            "hardware step and applied to all five tuners (active when AGC is off)")
             .float_param("cal_gain_db", "Calibration Gain (dB)",
                          -1.0f, 50.0f, -1.0f, 0.1f, SPC_SDR_GROUP_GAIN)
-                .param_description("Gain applied to all tuners while the noise source is on, "
-                                   "restored when it turns off. The burst replaces the antennas, "
-                                   "so the operating gain — set for weak off-air signals — rails "
-                                   "the 8-bit ADC and degrades the phase estimate. -1 = automatic "
-                                   "per-band value (heimdall's calibration gain table)")
+                .param_help("Gain applied to all tuners while the noise source is on, "
+                            "restored when it turns off. The burst replaces the antennas, "
+                            "so the operating gain — set for weak off-air signals — rails "
+                            "the 8-bit ADC and degrades the phase estimate. -1 = automatic "
+                            "per-band value (heimdall's calibration gain table)")
             // Hardware / calibration
             .int_param(SPC_SDR_FREQ_CORRECTION, "Freq Correction (PPM)",
                        -100, 100, 0, 1, SPC_SDR_GROUP_HARDWARE)
-                .param_description("Clock correction in PPM for the shared TCXO")
+                .param_help("Clock correction in PPM for the shared TCXO")
             .bool_param(SPC_SDR_DITHERING, "Frequency Dithering", false, SPC_SDR_GROUP_HARDWARE)
-                .param_description("Leave OFF for a coherent array: with the R820T2's sigma-delta "
-                                   "modulator running, each tuner's phase drifts independently and "
-                                   "the array decorrelates itself over minutes, taking any "
-                                   "calibration with it. On spreads the fractional-N PLL's spurs "
-                                   "into a noise pedestal, which only helps single-channel "
-                                   "reception. Exposed because OFF is a claim about this hardware "
-                                   "worth being able to test — compare the calibrator's lock "
-                                   "quality both ways. R820T-only; a V4's R828D rejects it")
+                .param_help("Leave OFF for a coherent array: with the R820T2's sigma-delta "
+                            "modulator running, each tuner's phase drifts independently and "
+                            "the array decorrelates itself over minutes, taking any "
+                            "calibration with it. On spreads the fractional-N PLL's spurs "
+                            "into a noise pedestal, which only helps single-channel "
+                            "reception. Exposed because OFF is a claim about this hardware "
+                            "worth being able to test — compare the calibrator's lock "
+                            "quality both ways. R820T-only; a V4's R828D rejects it")
             .bool_param("noise_source", "Calibration Noise Source", false, SPC_SDR_GROUP_HARDWARE)
-                .param_description("Toggle the onboard noise source (control dongle GPIO 0): "
-                                   "injects a common tone into all channels for a calibration node")
+                .param_help("Toggle the onboard noise source (control dongle GPIO 0): "
+                            "injects a common tone into all channels for a calibration node")
             .bool_param("bias_tee_ch0", "Bias-T Ch0", false, SPC_SDR_GROUP_HARDWARE)
-                .param_description("4.5V bias-tee on channel 0 SMA (control dongle GPIO 1) — PREVIEW, verify routing")
+                .param_help("4.5V bias-tee on channel 0 SMA (control dongle GPIO 1) — PREVIEW, verify routing")
             .bool_param("bias_tee_ch1", "Bias-T Ch1", false, SPC_SDR_GROUP_HARDWARE)
-                .param_description("4.5V bias-tee on channel 1 SMA (control dongle GPIO 2) — PREVIEW, verify routing")
+                .param_help("4.5V bias-tee on channel 1 SMA (control dongle GPIO 2) — PREVIEW, verify routing")
             .bool_param("bias_tee_ch2", "Bias-T Ch2", false, SPC_SDR_GROUP_HARDWARE)
-                .param_description("4.5V bias-tee on channel 2 SMA (control dongle GPIO 3) — PREVIEW, verify routing")
+                .param_help("4.5V bias-tee on channel 2 SMA (control dongle GPIO 3) — PREVIEW, verify routing")
             .bool_param("bias_tee_ch3", "Bias-T Ch3", false, SPC_SDR_GROUP_HARDWARE)
-                .param_description("4.5V bias-tee on channel 3 SMA (control dongle GPIO 4) — PREVIEW, verify routing")
+                .param_help("4.5V bias-tee on channel 3 SMA (control dongle GPIO 4) — PREVIEW, verify routing")
             .bool_param("bias_tee_ch4", "Bias-T Ch4", false, SPC_SDR_GROUP_HARDWARE)
-                .param_description("4.5V bias-tee on channel 4 SMA (control dongle GPIO 5) — PREVIEW, verify routing")
+                .param_help("4.5V bias-tee on channel 4 SMA (control dongle GPIO 5) — PREVIEW, verify routing")
             .bool_param("relax_serial_match", "Relax Serial Match", false, SPC_SDR_GROUP_HARDWARE)
-                .param_description("If serials 1000-1004 aren't found, use the first 5 RTL devices "
-                                   "(reflashed units; reference channel not guaranteed)")
+                .param_help("If serials 1000-1004 aren't found, use the first 5 RTL devices "
+                            "(reflashed units; reference channel not guaranteed)")
             .build_into(g_desc);
 
         scan_devices(nullptr);
@@ -494,7 +494,7 @@ static int set_parameter(SpcPluginInstance* inst, const char* name,
     }
     if (spc::try_set_bool(name, value, "relax_serial_match", s->relax_serial_match)) return 0;
 
-    return SPC_ERR_NOT_FOUND;
+    return SPC_NOT_FOUND;
 }
 
 static void param_rules(const SpcValue* values, uint32_t* states)
@@ -673,12 +673,11 @@ static int stop(SpcPluginInstance* inst)
 // Phase-1 abort (engine two-phase contract): interrupt all five tuners'
 // blocking reads via librtlsdr's callback-thread-safe cancel, so stop()'s
 // serial close_all() then joins promptly instead of cancelling each in turn.
-static int request_stop(SpcPluginInstance* inst)
+static void request_stop(SpcPluginInstance* inst)
 {
     auto* s = state(inst);
     for (int k = 0; k < NUM_CH; ++k)
         if (s->devices[k]) s->devices[k]->request_stop_streaming();
-    return 0;
 }
 
 // Full per-channel recovery: close and reopen the dongle. rtlsdr_open
@@ -732,9 +731,10 @@ static bool reopen_channel(KrakenSdrState* s, int k)
 // overhead low across the five ports.
 static constexpr uint32_t BATCH_SIZE = 65536;
 
-static int process(SpcPluginInstance* inst, const SpcData*, uint32_t,
-                   SpcData* outputs, uint32_t output_count)
+static int process(SpcPluginInstance* inst, SpcStep* step)
 {
+    SpcData* outputs = step->outputs;
+    const uint32_t output_count = step->output_count;
     auto* s = state(inst);
     if (output_count < static_cast<uint32_t>(NUM_CH)) return -1;
 
@@ -942,7 +942,7 @@ static int process(SpcPluginInstance* inst, const SpcData*, uint32_t,
             }
         }
 
-        // shared metadata + shared frame_number/timestamp so a downstream
+        // shared metadata + shared sequence/timestamp so a downstream
         // correlator can pair reference/surveillance samples of the same block
         spc::sdr::set_iq_metadata(
             *out,
@@ -1002,8 +1002,8 @@ static int process(SpcPluginInstance* inst, const SpcData*, uint32_t,
 
 // ── export ──────────────────────────────────────────────────────────
 
-SPC_PLUGIN_VTABLE(
-    .get_descriptor    = get_descriptor,
+SPC_EXPORT_PLUGIN(
+    .info              = get_descriptor,
     .create_instance   = create_instance,
     .destroy_instance  = destroy_instance,
     .params_changed    = spc::params_by_name<get_descriptor, set_parameter>,
@@ -1012,5 +1012,5 @@ SPC_PLUGIN_VTABLE(
     .start             = start,
     .stop              = stop,
     .set_host_services = set_host_services,
-    .request_stop      = request_stop
+    .interrupt         = request_stop
 )

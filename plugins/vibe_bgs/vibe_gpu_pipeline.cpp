@@ -82,7 +82,7 @@ bool VibeGpuPipeline::init(VulkanContext& ctx)
 
 bool VibeGpuPipeline::prepare(VulkanContext& ctx, uint32_t width, uint32_t height,
                                int num_channels, int bytes_per_channel, int bg_samples,
-                               const SpcHostServices* host, void* edge_ring_ctx)
+                               SpcGpuPass* pass)
 {
     if (width == width_ && height == height_ &&
         num_channels == num_channels_ && bytes_per_channel == bytes_per_channel_ &&
@@ -93,10 +93,10 @@ bool VibeGpuPipeline::prepare(VulkanContext& ctx, uint32_t width, uint32_t heigh
     wait_timeline_idle(ctx);
 
     // free old buffers (input upload + output are engine-owned now)
-    spc::gpu::free_after_frames(ctx, host, edge_ring_ctx, bg_model_buf_, bg_model_mem_);
-    spc::gpu::free_after_frames(ctx, host, edge_ring_ctx, detect_mask_buf_, detect_mask_mem_);
-    spc::gpu::free_after_frames(ctx, host, edge_ring_ctx, packed_mask_buf_, packed_mask_mem_);
-    spc::gpu::free_after_frames(ctx, host, edge_ring_ctx, staging_mask_);
+    spc::gpu::free_after_frames(ctx, pass, bg_model_buf_, bg_model_mem_);
+    spc::gpu::free_after_frames(ctx, pass, detect_mask_buf_, detect_mask_mem_);
+    spc::gpu::free_after_frames(ctx, pass, packed_mask_buf_, packed_mask_mem_);
+    spc::gpu::free_after_frames(ctx, pass, staging_mask_);
 
     width_ = width;
     height_ = height;
@@ -341,10 +341,10 @@ bool VibeGpuPipeline::record(VulkanContext& ctx, VkCommandBuffer cmd,
     if (recorded_transfer)
         barrier_transfer_to_compute();
 
-    // encode mask presence in frame_number high bit (matches run_process)
+    // encode mask presence in sequence high bit (matches run_process)
     VibePushConstants pc = params;
     if (has_mask)
-        pc.frame_number |= 0x80000000u;
+        pc.sequence |= 0x80000000u;
 
     // pass 1: process. 64x1 groups, matching the shader: a 16-wide group splits
     // every 32-thread warp across two rows, so each warp issues two disjoint

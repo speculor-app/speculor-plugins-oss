@@ -36,8 +36,7 @@ int main(int argc, char** argv) {
     // A plugin that computes on the GPU is lent this machine's, as the engine
     // would, so its GPU start-up is part of what conformance runs.
     std::shared_ptr<spc::gpu::VulkanContext> gpu;
-    const uint32_t gpu_caps = SPC_CAP_GPU_COMPUTE | SPC_CAP_GPU_OWN_SUBMIT | SPC_CAP_GPU_OWN_API;
-    if (d && (d->caps & gpu_caps)) gpu = spc::gpu::VulkanContext::get_shared();
+    if (d && d->gpu != SPC_GPU_NONE) gpu = spc::gpu::VulkanContext::get_shared();
 #endif
     const auto report = spc::testing::run_conformance(
         plugin, spc::testing::kProcessBound, [&](spc::testing::FakeHost& host) {

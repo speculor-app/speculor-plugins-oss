@@ -28,10 +28,10 @@ void check(bool cond, const std::string& what) {
     if (!cond) ++failures;
 }
 
-const SpcParam* find_param(const SpcPluginDescriptor* d, const char* name) {
+const SpcParam* find_param(const SpcNodeInfo* d, const char* name) {
     if (!d) return nullptr;
     for (uint32_t i = 0; i < d->param_count && i < SPC_PLUGIN_PARAM_MAX; ++i) {
-        if (std::strcmp(d->params[i].name, name) == 0) return &d->params[i];
+        if (std::strcmp(d->params[i].id, name) == 0) return &d->params[i];
     }
     return nullptr;
 }
@@ -52,7 +52,7 @@ int main(int argc, char** argv) {
     const auto* d = plugin.descriptor();
     std::printf("plugin: %s\n", d && d->id[0] ? d->id : "<no id>");
 
-    const SpcPluginVTable* vt = plugin.vtable();
+    const SpcPlugin* vt = plugin.vtable();
     spc::testing::FakeHost host;
 
     // --- scanning with nothing attached -------------------------------------
@@ -94,15 +94,17 @@ int main(int argc, char** argv) {
     check(rc_start == 0, "start() with no device selected succeeds");
     std::printf("    start() returned %d\n", rc_start);
 
-    // Two-phase shutdown: request_stop is the abort signal delivered while
+    // Two-phase shutdown: interrupt is the abort signal delivered while
     // process() may still be running, stop is the teardown after it returns.
-    check(plugin.request_stop() == 0, "request_stop() after start");
-    check(plugin.stop() == 0, "stop() after request_stop");
+    plugin.interrupt();
+    check(true, "interrupt() after start");
+    check(plugin.stop() == 0, "stop() after interrupt");
 
     // The engine legitimately stops a node that already stopped itself after a
     // fatal error, and three separate hangs this month came out of that path.
     check(plugin.stop() == 0, "stop() is idempotent");
-    check(plugin.request_stop() == 0, "request_stop() after stop is safe");
+    plugin.interrupt();
+    check(true, "interrupt() after stop is safe");
 
     plugin.destroy();
     check(true, "destroy after stop");

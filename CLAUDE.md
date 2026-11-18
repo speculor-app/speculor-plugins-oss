@@ -40,7 +40,7 @@ common/bgs/        # LITIV-derived CPU algorithm sources (Apache-2.0, © 2015 P-
 plugins/
   vibe_bgs/        # ViBe BGS plugin (CPU + Vulkan GPU)
   subsense_bgs/    # SuBSENSE BGS plugin (CPU + Vulkan GPU)
-  rtl_sdr/         # RTL-SDR I/Q source — data-source plugin (SPC_PLUGIN_DATA_SOURCE, needs SDK ≥ 0.20.0); links librtlsdr LGPL-2.1+ at runtime
+  rtl_sdr/         # RTL-SDR I/Q source — source plugin (SPC_NODE_SOURCE, needs SDK ≥ 0.58.0); links librtlsdr LGPL-2.1+ at runtime
   nesdr/           # NooElec NESDR I/Q source; compiles rtl_sdr's device layer. Same ports/params/vtable as
                    #   rtl_sdr, but gates each hardware control on a per-model capability table (nesdr_models.*).
                    #   SPC_MATURITY_EXPERIMENTAL: never run against a NESDR — the table comes from NooElec's
@@ -88,7 +88,7 @@ Four tiers, each registered per plugin so a failure names the plugin:
 
 Conformance is the floor, not the goal: it proves the plugin loads and answers the ABI honestly, never that it works. Pick the tier that matches the plugin's contract — and where no hardware exists in CI, the no-device paths are still worth asserting, since the librtlsdr heap corruption and the unbounded-stop bugs both lived there.
 
-The harness ships in the bundle at `include/speculor_common/testing/`, which `spc_add_plugin_test` puts on the include path — so a runner includes it as `<testing/conformance.h>`, `<testing/plugin_under_test.h>`, `<testing/fake_host.h>`. `PluginUnderTest` loads the built plugin through its exported `spc_plugin_vtable`, `FakeHost` stands in for `SpcHostServices`, and `run_conformance()` returns a report rather than asserting.
+The harness ships in the bundle at `include/speculor_common/testing/`, which `spc_add_plugin_test` puts on the include path — so a runner includes it as `<testing/conformance.h>`, `<testing/plugin_under_test.h>`, `<testing/fake_host.h>`. `PluginUnderTest` loads the built plugin through its exported `spc_plugin`, `FakeHost` stands in for `SpcHost`, and `run_conformance()` returns a report rather than asserting.
 
 It arrives with the bundle CI already downloads — but a harness fix only reaches this repo when a **new bundle is published**, since the build resolves the latest published release rather than a pinned version.
 

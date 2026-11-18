@@ -43,8 +43,8 @@ ships no LITIV-derived code.
    [speculor-sdk-dist releases](https://github.com/speculor-app/speculor-sdk-dist/releases)
    and extract it. It is self-contained (ships OpenCV, FFmpeg, Vulkan, spclib + the
    CMake config/helpers) — you need only CMake ≥ 3.24, Ninja and a C++20 compiler.
-   The current plugins require an SDK bundle **≥ 0.20.0** (`rtl_sdr` declares the
-   `SPC_PLUGIN_DATA_SOURCE` descriptor flag, added in SDK 0.20.0).
+   The current plugins require an SDK bundle **≥ 0.58.0** (they are built against the
+   plugin boundary of `SPC_ABI` 58, `speculor/plugin.h`).
 
 2. **Build**, pointing `CMAKE_PREFIX_PATH` at the extracted folder:
 
