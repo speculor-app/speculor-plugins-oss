@@ -69,7 +69,7 @@ const Expect k_expect[] = {
 };
 constexpr int k_expect_count = static_cast<int>(sizeof(k_expect) / sizeof(k_expect[0]));
 
-const SpcParameterDesc* find_param(const SpcPluginDescriptor* d, const char* name) {
+const SpcParam* find_param(const SpcPluginDescriptor* d, const char* name) {
     if (!d) return nullptr;
     for (uint32_t i = 0; i < d->param_count && i < SPC_PLUGIN_PARAM_MAX; ++i)
         if (std::strcmp(d->params[i].name, name) == 0) return &d->params[i];
@@ -166,43 +166,43 @@ int main(int argc, char** argv) {
     // The descriptor is static while the profile is not, so the range has to be
     // the union across the line: 100 kHz for the SMArt v5's direct-sampling
     // floor, up to the largest frequency an INT parameter in Hz can carry.
-    if (const SpcParameterDesc* f = find_param(d, "center_freq")) {
+    if (const SpcParam* f = find_param(d, "center_freq")) {
         check(f->type == SPC_PARAM_INT, "center_freq is an INT parameter (sdr_params.h contract)");
-        check(f->int_val.min <= 100000, "center_freq reaches down to the SMArt v5's 100 kHz");
-        check(f->int_val.max >= 1750000000, "center_freq reaches the R820T2 ceiling");
-        check(f->int_val.max <= 2147483647, "center_freq max is representable as int32");
-        std::printf("    center_freq range: %d .. %d Hz\n", f->int_val.min, f->int_val.max);
+        check(f->min.i <= 100000, "center_freq reaches down to the SMArt v5's 100 kHz");
+        check(f->max.i >= 1750000000, "center_freq reaches the R820T2 ceiling");
+        check(f->max.i <= 2147483647, "center_freq max is representable as int32");
+        std::printf("    center_freq range: %d .. %d Hz\n", f->min.i, f->max.i);
     } else {
         check(false, "descriptor declares center_freq");
     }
 
-    if (const SpcParameterDesc* g = find_param(d, "mgc_gain")) {
-        check(g->float_val.min <= -1.0f, "mgc_gain reaches the E4000's -1.0 dB step");
-        check(g->float_val.max >= 49.6f, "mgc_gain reaches the R820T2's 49.6 dB step");
+    if (const SpcParam* g = find_param(d, "mgc_gain")) {
+        check(g->min.f <= -1.0f, "mgc_gain reaches the E4000's -1.0 dB step");
+        check(g->max.f >= 49.6f, "mgc_gain reaches the R820T2's 49.6 dB step");
     } else {
         check(false, "descriptor declares mgc_gain");
     }
 
     // --- the model enum ------------------------------------------------------
-    const SpcParameterDesc* model = find_param(d, "model");
+    const SpcParam* model = find_param(d, "model");
     if (!model) {
         check(false, "descriptor declares model");
         std::printf("FAILED: %d\n", ++failures);
         return 1;
     }
-    check(model->enum_val.count == k_expect_count + 1,
+    const int model_count = static_cast<int>(model->option_count);
+    check(model_count == k_expect_count + 1,
           "model enum lists Auto-detect plus every profile");
     std::printf("    model enum: %d option(s), expected %d\n",
-                model->enum_val.count, k_expect_count + 1);
-    check(std::strcmp(model->enum_val.labels[0], "Auto-detect") == 0,
+                model_count, k_expect_count + 1);
+    check(model_count > 0 && std::strcmp(model->options[0].label, "Auto-detect") == 0,
           "model option 0 is Auto-detect");
 
     // Copy the labels out: get_parameter rewrites the caller's buffer, and the
     // descriptor is shared mutable state that scan_devices also patches.
     std::string labels[SPC_PARAM_ENUM_MAX];
-    for (int i = 0; i < model->enum_val.count && i < SPC_PARAM_ENUM_MAX; ++i)
-        labels[i] = model->enum_val.labels[i];
-    const int model_count = model->enum_val.count;
+    for (int i = 0; i < model_count && i < SPC_PARAM_ENUM_MAX; ++i)
+        labels[i] = model->options[i].label;
 
     check(plugin.create(), "create_instance");
     spc::testing::FakeHost host;

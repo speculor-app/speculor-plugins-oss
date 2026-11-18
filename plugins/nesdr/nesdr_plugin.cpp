@@ -180,21 +180,16 @@ static const ModelCaps* active_profile(const NesdrState* s)
 static spc::DescriptorStorage g_desc;
 static bool g_desc_initialized = false;
 
-static SpcParameterDesc* find_param(const char* name)
-{
-    for (uint32_t i = 0; i < g_desc.param_count(); ++i)
-        if (std::strcmp(g_desc.param(i).name, name) == 0) return &g_desc.param(i);
-    return nullptr;
-}
-
 // Fill the model override's options from the capability table rather than
 // restating them as literals, so a model added to the table cannot go missing
 // from the parameter.
 static void patch_model_enum()
 {
-    SpcParameterDesc* p = find_param("model");
-    if (!p) return;
-    auto& ev = p->enum_val;
+    const uint32_t index = spc::param_index(g_desc.get(), "model");
+    if (index == UINT32_MAX) return;
+    SpcParameterDesc p;
+    spc::param_carrier(g_desc.get()->params[index], p);
+    auto& ev = p.enum_val;
     int n = 1 + spc::nesdr::model_count();
     if (n > SPC_PARAM_ENUM_MAX) n = SPC_PARAM_ENUM_MAX;
     ev.count = n;
@@ -205,6 +200,7 @@ static void patch_model_enum()
         std::strncpy(ev.labels[i], m ? m->label : "?", SPC_PARAM_ENUM_LABEL_MAX - 1);
         ev.labels[i][SPC_PARAM_ENUM_LABEL_MAX - 1] = '\0';
     }
+    g_desc.set_param(index, p);
 }
 
 static void scan_devices(const SpcHostServices* svc)
