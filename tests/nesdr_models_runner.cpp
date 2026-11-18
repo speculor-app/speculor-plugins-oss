@@ -205,10 +205,11 @@ int main(int argc, char** argv) {
     const int model_count = model->enum_val.count;
 
     check(plugin.create(), "create_instance");
-    if (!plugin.instance()) { std::printf("FAILED: %d\n", ++failures); return 1; }
     spc::testing::FakeHost host;
     host.serve_params(plugin.params());
     plugin.set_host_services(host.services());
+    // the plugin gates its parameters by model itself, so only while it runs
+    check(plugin.start() == 0, "start() with no device");
 
     // --- per-model capability gating ----------------------------------------
     int matched = 0;

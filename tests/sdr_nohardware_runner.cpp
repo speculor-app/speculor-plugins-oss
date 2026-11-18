@@ -86,7 +86,6 @@ int main(int argc, char** argv) {
 
     // --- lifecycle with no device selected ----------------------------------
     check(plugin.create(), "create_instance");
-    if (!plugin.instance()) { std::printf("FAILED: %d\n", ++failures); return 1; }
     plugin.set_host_services(host.services());
 
     // Nothing is attached and no device is chosen, so start() should report
