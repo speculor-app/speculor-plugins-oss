@@ -160,20 +160,20 @@ static int32_t hit_test_airspace(MapDisplayState* s,
 // Modal handler for the right-click delete confirmation. While active, every
 // other map interaction is gated — the user must explicitly Cancel or Delete
 // before resuming normal use of the map.
-static int handle_delete_confirm_event(MapDisplayState* s, const SpcInputEvent* event)
+static int handle_delete_confirm_event(MapDisplayState* s, const SpcUiInput* event)
 {
     const auto p = s->params.snapshot();
     int w = p.width;
     int h = p.height;
 
     // ESC cancels.
-    if (event->type == SPC_INPUT_EVENT_KEY_PRESS
+    if (event->type == SPC_UI_KEY_PRESS
         && event->key.key_code == SPC_KEY_ESCAPE) {
         s->delete_confirm_idx.store(-1, std::memory_order_relaxed);
         return 0;
     }
 
-    if (event->type == SPC_INPUT_EVENT_MOUSE_PRESS) {
+    if (event->type == SPC_UI_MOUSE_PRESS) {
         // Right-click anywhere cancels.
         if (event->mouse.button & SPC_MOUSE_BUTTON_RIGHT) {
             s->delete_confirm_idx.store(-1, std::memory_order_relaxed);
@@ -226,7 +226,7 @@ static int handle_delete_confirm_event(MapDisplayState* s, const SpcInputEvent* 
     return 0;
 }
 
-int handle_event(MapDisplayState* s, const SpcInputEvent* event)
+int handle_event(MapDisplayState* s, const SpcUiInput* event)
 {
     // Modal short-circuit — owns all input until the user dismisses it.
     if (s->delete_confirm_idx.load(std::memory_order_acquire) >= 0) {
@@ -261,7 +261,7 @@ int handle_event(MapDisplayState* s, const SpcInputEvent* event)
             &center_lat, &center_lon);
 
         if (result == 0) {
-            if (event->type == SPC_INPUT_EVENT_MOUSE_PRESS &&
+            if (event->type == SPC_UI_MOUSE_PRESS &&
                 s->list_state.selected_icao != prev_selected) {
                 // promote list selection to a full info-panel selection,
                 // so the row click behaves like a click on the map icon
@@ -271,7 +271,7 @@ int handle_event(MapDisplayState* s, const SpcInputEvent* event)
                 s->info_panel_icao.store(s->list_state.selected_icao,
                                           std::memory_order_relaxed);
             }
-            if (event->type == SPC_INPUT_EVENT_MOUSE_PRESS && center_lat != 0.0) {
+            if (event->type == SPC_UI_MOUSE_PRESS && center_lat != 0.0) {
                 s->center_lat.store(center_lat, std::memory_order_relaxed);
                 s->center_lon.store(center_lon, std::memory_order_relaxed);
                 s->interactive_view.store(true, std::memory_order_relaxed);
@@ -283,7 +283,7 @@ int handle_event(MapDisplayState* s, const SpcInputEvent* event)
     // ── map area event handling ───────────────────────────────────────
 
     switch (event->type) {
-        case SPC_INPUT_EVENT_MOUSE_PRESS:
+        case SPC_UI_MOUSE_PRESS:
             if (event->mouse.button & SPC_MOUSE_BUTTON_LEFT) {
                 s->drag_active.store(true, std::memory_order_relaxed);
                 s->drag_start_x = event->mouse.x;
@@ -356,7 +356,7 @@ int handle_event(MapDisplayState* s, const SpcInputEvent* event)
             }
             return 0;
 
-        case SPC_INPUT_EVENT_MOUSE_RELEASE:
+        case SPC_UI_MOUSE_RELEASE:
             if (event->mouse.button & SPC_MOUSE_BUTTON_LEFT) {
                 s->drag_active.store(false, std::memory_order_relaxed);
 
@@ -433,7 +433,7 @@ int handle_event(MapDisplayState* s, const SpcInputEvent* event)
             }
             return 0;
 
-        case SPC_INPUT_EVENT_MOUSE_MOVE: {
+        case SPC_UI_MOUSE_MOVE: {
             if (s->drag_active.load(std::memory_order_relaxed)) {
                 float dx_norm = event->mouse.x - s->drag_start_x;
                 float dy_norm = event->mouse.y - s->drag_start_y;
@@ -473,7 +473,7 @@ int handle_event(MapDisplayState* s, const SpcInputEvent* event)
             return 0;
         }
 
-        case SPC_INPUT_EVENT_MOUSE_WHEEL: {
+        case SPC_UI_MOUSE_WHEEL: {
             // zoom anchored to cursor position
             float mx = event->mouse.x;
             float my = event->mouse.y;

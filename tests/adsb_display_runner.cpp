@@ -59,7 +59,7 @@ int main(int argc, char** argv) {
     const auto* d = plugin.descriptor();
     std::printf("plugin: %s\n", d && d->id[0] ? d->id : "<no id>");
 
-    const SpcPluginVTable* vt = plugin.vtable();
+    const SpcPlugin* vt = plugin.vtable();
     spc::testing::FakeHost host;
 
     check(plugin.create(), "create_instance");
@@ -151,14 +151,14 @@ int main(int argc, char** argv) {
     // assumes otherwise faults on a stray click. After a stop there is no
     // instance to hand one to.
     // A null event is deliberately not tested: unlike scan_devices, whose ABI
-    // comment states host_services may be null, SpcOnInputEventFn documents no
-    // such allowance, and the engine calls it as on_input_event(inst, &event)
+    // comment states host_services may be null, the ui_input slot documents no
+    // such allowance, and the engine calls it as ui_input(inst, &event)
     // from a reference — so null is unreachable. Asserting on it would invent a
     // contract and fail a plugin that correctly assumes a valid pointer.
-    if (vt->on_input_event && plugin.instance()) {
-        SpcInputEvent ev{};
-        check(vt->on_input_event(plugin.instance(), &ev) >= -1,
-              "on_input_event tolerates a zeroed event");
+    if (vt->ui_input && plugin.instance()) {
+        SpcUiInput ev{};
+        vt->ui_input(plugin.instance(), &ev);
+        check(true, "ui_input tolerates a zeroed event");
     }
 
     check(plugin.stop() == 0, "stop()");

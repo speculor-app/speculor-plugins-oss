@@ -203,10 +203,10 @@ static void patch_model_enum()
     g_desc.set_param(index, p);
 }
 
-static void scan_devices(const SpcHostServices* svc)
+static void scan_devices(SpcHost* svc)
 {
     SpcLogContext log{};
-    if (svc && svc->log) log = {svc->log, svc->host_ctx};
+    if (svc && svc->log) log = spc::log_context(svc);
 
     SPC_LOG_INFO(&log, "NESDR: scanning for devices...");
     g_registry.scan(&log);
@@ -239,15 +239,15 @@ static void scan_devices(const SpcHostServices* svc)
     }
 }
 
-static const SpcPluginDescriptor* get_descriptor()
+static const SpcNodeInfo* get_descriptor()
 {
     if (!g_desc_initialized) {
         spc::DescriptorBuilder("nesdr", "NooElec NESDR", "Signal/SDR/Sources")
             .author("Speculor").version("0.1.0")
-            .data_source()
-            .description("Streams I/Q data from NooElec NESDR receivers (Mini, Nano, SMArt, "
-                         "SMArTee and XTR bodies), gating each control on what the selected "
-                         "model's board actually provides")
+            .source()
+            .help("Streams I/Q data from NooElec NESDR receivers (Mini, Nano, SMArt, "
+                  "SMArTee and XTR bodies), gating each control on what the selected "
+                  "model's board actually provides")
             // Not yet run against any NESDR: the capability table is built from
             // NooElec's published specifications, and only the table itself is
             // covered by tests. PREVIEW would claim "functional".
@@ -259,8 +259,8 @@ static const SpcPluginDescriptor* get_descriptor()
             })
             // Device
             .enum_param("device", "Device", {"(no devices found)"}, 0, SPC_SDR_GROUP_DEVICE).listed()
-                .param_description("Connected receiver to use. Every RTL2832U device is listed; "
-                                   "ones whose USB strings identify a NESDR model are named")
+                .param_help("Connected receiver to use. Every RTL2832U device is listed; "
+                            "ones whose USB strings identify a NESDR model are named")
                 .mandatory()
             // Tuning — the range is the union across the line, since a
             // descriptor is static while the profile is not. What the selected
@@ -269,57 +269,57 @@ static const SpcPluginDescriptor* get_descriptor()
             .int_param(SPC_SDR_CENTER_FREQ, "Center Freq (Hz)", 100000,
                        static_cast<int32_t>(spc::nesdr::MAX_PARAM_FREQ_HZ),
                        100000000, 1000, SPC_SDR_GROUP_TUNING)
-                .param_description("Receiver center frequency in Hz, clamped to the selected "
-                                   "model's range (100 kHz only on the SMArt v5, which has a "
-                                   "wired Q-branch)")
+                .param_help("Receiver center frequency in Hz, clamped to the selected "
+                            "model's range (100 kHz only on the SMArt v5, which has a "
+                            "wired Q-branch)")
             .int_param(SPC_SDR_SAMPLE_RATE, "Sample Rate (Hz)", 225001, 3200000, 2048000, 1000, SPC_SDR_GROUP_TUNING)
-                .param_description("ADC sample rate in Hz (higher = wider bandwidth, more CPU)")
+                .param_help("ADC sample rate in Hz (higher = wider bandwidth, more CPU)")
             .int_param(SPC_SDR_BANDWIDTH, "IF Bandwidth (Hz)", 0, 3200000, 0, 10000, SPC_SDR_GROUP_TUNING)
-                .param_description("IF bandwidth in Hz (0 = automatic, matched to sample rate)")
+                .param_help("IF bandwidth in Hz (0 = automatic, matched to sample rate)")
             // Gain
             .bool_param(SPC_SDR_AGC_ENABLED, "AGC", true, SPC_SDR_GROUP_GAIN)
-                .param_description("Automatic gain control")
+                .param_help("Automatic gain control")
             .float_param(SPC_SDR_GAIN, "Manual Gain (dB)", -1.0f, 50.0f, 30.0f, 0.1f, SPC_SDR_GROUP_GAIN)
-                .param_description("Manual tuner gain in dB, snapped to the nearest step the "
-                                   "device supports (R820T2 spans 0-49.6 dB, E4000 -1.0-42.0 dB). "
-                                   "Active when AGC is off")
+                .param_help("Manual tuner gain in dB, snapped to the nearest step the "
+                            "device supports (R820T2 spans 0-49.6 dB, E4000 -1.0-42.0 dB). "
+                            "Active when AGC is off")
             // Hardware
             .enum_param("model", "Model", {"Auto-detect"}, 0, SPC_SDR_GROUP_HARDWARE)
-                .param_description("Which NESDR board this is, which decides what the controls "
-                                   "below can do. Auto-detect reads the USB strings and confirms "
-                                   "the tuner family when the device opens; set it by hand for a "
-                                   "dongle flashed with stock Realtek strings")
+                .param_help("Which NESDR board this is, which decides what the controls "
+                            "below can do. Auto-detect reads the USB strings and confirms "
+                            "the tuner family when the device opens; set it by hand for a "
+                            "dongle flashed with stock Realtek strings")
             .enum_param(SPC_SDR_DIRECT_SAMPLING, "Direct Sampling", {"Off", "I-ADC", "Q-ADC"}, 0, SPC_SDR_GROUP_HARDWARE)
-                .param_description("Direct sampling for HF below 24 MHz. Only meaningful on a "
-                                   "board with a wired Q-branch (SMArt v5); every other NESDR "
-                                   "needs an upconverter, so this stays disabled there")
+                .param_help("Direct sampling for HF below 24 MHz. Only meaningful on a "
+                            "board with a wired Q-branch (SMArt v5); every other NESDR "
+                            "needs an upconverter, so this stays disabled there")
             .bool_param("offset_tuning", "Offset Tuning", false, SPC_SDR_GROUP_HARDWARE)
-                .param_description("Avoid the DC spike at center frequency on zero-IF tuners. "
-                                   "E4000 (XTR) only: on an R820T2 librtlsdr repurposes this "
-                                   "call to switch the bias tee, so it stays disabled there")
+                .param_help("Avoid the DC spike at center frequency on zero-IF tuners. "
+                            "E4000 (XTR) only: on an R820T2 librtlsdr repurposes this "
+                            "call to switch the bias tee, so it stays disabled there")
             .bool_param(SPC_SDR_BIAS_TEE, "Bias-T", false, SPC_SDR_GROUP_HARDWARE)
-                .param_description("Bias-T voltage for active antennas and LNAs. Disabled on "
-                                   "boards without the circuit; on a SMArTee it is powered by "
-                                   "hardware whenever the dongle is, and cannot be switched off")
+                .param_help("Bias-T voltage for active antennas and LNAs. Disabled on "
+                            "boards without the circuit; on a SMArTee it is powered by "
+                            "hardware whenever the dongle is, and cannot be switched off")
             .int_param(SPC_SDR_FREQ_CORRECTION, "Freq Correction (PPM)", -100, 100, 0, 1, SPC_SDR_GROUP_HARDWARE)
-                .param_description("Crystal offset correction in parts per million. TCXO models "
-                                   "(0.5 PPM) need approximately 0; the plain-crystal Mini 2 and "
-                                   "Nano 2 drift and do need it")
+                .param_help("Crystal offset correction in parts per million. TCXO models "
+                            "(0.5 PPM) need approximately 0; the plain-crystal Mini 2 and "
+                            "Nano 2 drift and do need it")
             .bool_param(SPC_SDR_DITHERING, "Frequency Dithering", true, SPC_SDR_GROUP_HARDWARE)
-                .param_description("R820T/R820T2 only. On spreads the fractional-N PLL's spurs "
-                                   "into a noise pedestal, which is what general reception wants. "
-                                   "Off leaves discrete spurs but holds the tuner's phase steady, "
-                                   "which narrowband and phase-sensitive work needs")
+                .param_help("R820T/R820T2 only. On spreads the fractional-N PLL's spurs "
+                            "into a noise pedestal, which is what general reception wants. "
+                            "Off leaves discrete spurs but holds the tuner's phase steady, "
+                            "which narrowband and phase-sensitive work needs")
             .bool_param("test_mode", "Test Mode", false, SPC_SDR_GROUP_HARDWARE)
-                .param_description("Output an 8-bit counter instead of samples (debug)")
+                .param_help("Output an 8-bit counter instead of samples (debug)")
             .enum_param("if_gain_stage", "IF Gain Stage",
                         {"Stage 1", "Stage 2", "Stage 3", "Stage 4", "Stage 5", "Stage 6"},
                         0, SPC_SDR_GROUP_HARDWARE)
-                .param_description("Which of the E4000's six IF gain stages the IF Gain value "
-                                   "below applies to (XTR models only)")
+                .param_help("Which of the E4000's six IF gain stages the IF Gain value "
+                            "below applies to (XTR models only)")
             .int_param("if_gain", "IF Gain (0.1 dB)", -30, 90, 0, 10, SPC_SDR_GROUP_HARDWARE)
-                .param_description("Intermediate frequency gain in tenths of dB for the selected "
-                                   "stage (E4000 tuner, XTR models only)")
+                .param_help("Intermediate frequency gain in tenths of dB for the selected "
+                            "stage (E4000 tuner, XTR models only)")
             .build_into(g_desc);
 
         patch_model_enum();
@@ -465,7 +465,7 @@ static void apply_center_freq(NesdrState* s)
 // the board powers by itself reads as on.
 static void show_profile(NesdrState* s)
 {
-    const SpcPluginDescriptor* d = get_descriptor();
+    const SpcNodeInfo* d = get_descriptor();
     const ModelCaps* p = active_profile(s);
     const bool e4000 = p && p->tuner == Tuner::E4000;
 
@@ -548,7 +548,7 @@ static int set_parameter(SpcPluginInstance* inst, const char* name,
         return 0;
     }
     // The capability-gated controls below check the profile BEFORE storing, so
-    // a rejected set leaves no trace: sdr_params.h makes SPC_ERR_NOT_FOUND the
+    // a rejected set leaves no trace: sdr_params.h makes SPC_NOT_FOUND the
     // report for "this device does not have that", and a plugin that answers
     // "unsupported" while quietly keeping the value would hand the next start()
     // a setting the user was told was refused. The host is handed back the
@@ -559,16 +559,16 @@ static int set_parameter(SpcPluginInstance* inst, const char* name,
     if (std::strcmp(name, SPC_SDR_DIRECT_SAMPLING) == 0) {
         const ModelCaps* p = active_profile(s);
         if (!p || !p->direct_sampling) {
-            if (value->enum_val.value == s->direct_sampling) return SPC_ERR_NOT_FOUND;
+            if (value->enum_val.value == s->direct_sampling) return SPC_NOT_FOUND;
             SPC_LOG_WARN(&s->host.cached_log,
                 "NESDR: %s has no wired Q-branch, so direct sampling would tune to "
                 "nothing — ignoring. Use an upconverter for HF on this model",
                 p ? p->label : "this device");
             s->host.set_choice(param, s->direct_sampling);
-            return SPC_ERR_NOT_FOUND;
+            return SPC_NOT_FOUND;
         }
         if (!spc::try_set_enum(name, value, SPC_SDR_DIRECT_SAMPLING, s->direct_sampling))
-            return SPC_ERR_INVALID;
+            return SPC_INVALID;
         if (live) apply_direct_sampling(s, wanted_direct_sampling(s));
         return 0;
     }
@@ -578,26 +578,26 @@ static int set_parameter(SpcPluginInstance* inst, const char* name,
             // Not a harmless no-op to swallow: on an R820T/R828D librtlsdr
             // routes this call straight to the bias tee, so honouring it would
             // put voltage on the antenna port.
-            if (value->bool_val.value == s->offset_tuning) return SPC_ERR_NOT_FOUND;
+            if (value->bool_val.value == s->offset_tuning) return SPC_NOT_FOUND;
             SPC_LOG_WARN(&s->host.cached_log,
                 "NESDR: offset tuning is not available on %s — ignoring",
                 p ? p->label : "this device");
             s->host.set_int(param, s->offset_tuning);
-            return SPC_ERR_NOT_FOUND;
+            return SPC_NOT_FOUND;
         }
         if (!spc::try_set_bool(name, value, "offset_tuning", s->offset_tuning))
-            return SPC_ERR_INVALID;
+            return SPC_INVALID;
         if (live) dev->set_offset_tuning(s->offset_tuning != 0);
         return 0;
     }
     if (std::strcmp(name, SPC_SDR_BIAS_TEE) == 0) {
         const ModelCaps* p = active_profile(s);
         if (!p || p->bias == BiasTee::None) {
-            if (value->bool_val.value == s->bias_tee) return SPC_ERR_NOT_FOUND;
+            if (value->bool_val.value == s->bias_tee) return SPC_NOT_FOUND;
             SPC_LOG_WARN(&s->host.cached_log, "NESDR: %s has no bias tee — ignoring",
                          p ? p->label : "this device");
             s->host.set_int(param, s->bias_tee);
-            return SPC_ERR_NOT_FOUND;
+            return SPC_NOT_FOUND;
         }
         if (p->bias == BiasTee::AlwaysOn) {
             s->bias_tee = 1;  // hardware-powered whenever the dongle is
@@ -605,7 +605,7 @@ static int set_parameter(SpcPluginInstance* inst, const char* name,
             return 0;
         }
         if (!spc::try_set_bool(name, value, SPC_SDR_BIAS_TEE, s->bias_tee))
-            return SPC_ERR_INVALID;
+            return SPC_INVALID;
         if (live) dev->set_bias_tee(s->bias_tee != 0);
         return 0;
     }
@@ -613,10 +613,10 @@ static int set_parameter(SpcPluginInstance* inst, const char* name,
         const ModelCaps* p = active_profile(s);
         if (!p || !p->dithering) {
             if (value->bool_val.value != s->dithering) s->host.set_int(param, s->dithering);
-            return SPC_ERR_NOT_FOUND;
+            return SPC_NOT_FOUND;
         }
         if (!spc::try_set_bool(name, value, SPC_SDR_DITHERING, s->dithering))
-            return SPC_ERR_INVALID;
+            return SPC_INVALID;
         if (live) {
             dev->set_dithering(s->dithering != 0);
             apply_center_freq(s);  // only reaches the PLL at its next programming
@@ -632,11 +632,11 @@ static int set_parameter(SpcPluginInstance* inst, const char* name,
             } else if (value->int_val.value != s->if_gain) {
                 s->host.set_int(param, s->if_gain);
             }
-            return SPC_ERR_NOT_FOUND;
+            return SPC_NOT_FOUND;
         }
         const bool ok = spc::try_set_enum(name, value, "if_gain_stage", s->if_gain_stage)
                      || spc::try_set_int(name, value, "if_gain", s->if_gain);
-        if (!ok) return SPC_ERR_INVALID;
+        if (!ok) return SPC_INVALID;
         if (live) dev->set_tuner_if_gain(s->if_gain_stage + 1, s->if_gain);
         return 0;
     }
@@ -653,7 +653,7 @@ static int set_parameter(SpcPluginInstance* inst, const char* name,
         return 0;
     }
 
-    return SPC_ERR_NOT_FOUND;
+    return SPC_NOT_FOUND;
 }
 
 static void param_rules(const SpcValue* values, uint32_t* states)
@@ -671,10 +671,10 @@ static void param_rules(const SpcValue* values, uint32_t* states)
 }
 
 static int list_options(uint32_t param, const SpcValue*, int refresh,
-                        const SpcHostServices* host_services,
+                        SpcHost* host_services,
                         SpcOptionSinkFn sink, void* sink_ctx)
 {
-    if (param != spc::param_index(get_descriptor(), "device")) return SPC_ERR_NOT_FOUND;
+    if (param != spc::param_index(get_descriptor(), "device")) return SPC_NOT_FOUND;
     if (refresh) scan_devices(host_services);
     for (int i = 0; i < g_registry.count; ++i)
         sink(sink_ctx, g_registry.ids[i], g_registry.devices[i].label);
@@ -817,20 +817,20 @@ static int stop(SpcPluginInstance* inst)
 // Phase-1 abort (engine two-phase contract): interrupt the blocking async read
 // so stop() is prompt and never waits a read timeout. Runs concurrently with
 // process(); only kicks librtlsdr's cancel, frees nothing.
-static int request_stop(SpcPluginInstance* inst)
+static void request_stop(SpcPluginInstance* inst)
 {
     auto* s = state(inst);
     if (s->device) s->device->request_stop_streaming();
-    return 0;
 }
 
 // ── process ─────────────────────────────────────────────────────────
 
 static constexpr uint32_t BATCH_SIZE = 4096;
 
-static int process(SpcPluginInstance* inst, const SpcData*, uint32_t,
-                   SpcData* outputs, uint32_t output_count)
+static int process(SpcPluginInstance* inst, SpcStep* step)
 {
+    SpcData* outputs = step->outputs;
+    const uint32_t output_count = step->output_count;
     auto* s = state(inst);
     if (output_count < 1) return -1;
 
@@ -873,8 +873,8 @@ static int process(SpcPluginInstance* inst, const SpcData*, uint32_t,
 
 // ── export ──────────────────────────────────────────────────────────
 
-SPC_PLUGIN_VTABLE(
-    .get_descriptor     = get_descriptor,
+SPC_EXPORT_PLUGIN(
+    .info               = get_descriptor,
     .create_instance    = create_instance,
     .destroy_instance   = destroy_instance,
     .params_changed    = spc::params_by_name<get_descriptor, set_parameter>,
@@ -884,5 +884,5 @@ SPC_PLUGIN_VTABLE(
     .start              = start,
     .stop               = stop,
     .set_host_services  = set_host_services,
-    .request_stop       = request_stop
+    .interrupt          = request_stop
 )

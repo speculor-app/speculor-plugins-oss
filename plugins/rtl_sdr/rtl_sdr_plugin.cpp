@@ -192,10 +192,10 @@ static void apply_direct_sampling(RtlSdrState* s, int want)
     apply_gain_config(s);
 }
 
-static void scan_devices(const SpcHostServices* svc)
+static void scan_devices(SpcHost* svc)
 {
     SpcLogContext log{};
-    if (svc && svc->log) log = {svc->log, svc->host_ctx};
+    if (svc && svc->log) log = spc::log_context(svc);
 
     SPC_LOG_INFO(&log, "RTL-SDR: scanning for devices...");
     g_registry.scan(&log);
@@ -226,13 +226,13 @@ static void scan_devices(const SpcHostServices* svc)
     }
 }
 
-static const SpcPluginDescriptor* get_descriptor()
+static const SpcNodeInfo* get_descriptor()
 {
     if (!g_desc_initialized) {
         spc::DescriptorBuilder("rtl_sdr", "RTL-SDR", "Signal/SDR/Sources")
             .author("Speculor").version("0.1.0")
-            .data_source()
-            .description("Streams I/Q data from RTL-SDR Blog V3 (R820T2) and V4 (R828D) receivers")
+            .source()
+            .help("Streams I/Q data from RTL-SDR Blog V3 (R820T2) and V4 (R828D) receivers")
             .maturity(SPC_MATURITY_PREVIEW)
             .tags({"radio"})
             .output_signal("iq_out", "I/Q Output", {
@@ -241,44 +241,44 @@ static const SpcPluginDescriptor* get_descriptor()
             })
             // Device
             .enum_param("device", "Device", {"(no devices found)"}, 0, SPC_SDR_GROUP_DEVICE).listed()
-                .param_description("Connected RTL-SDR receiver to use")
+                .param_help("Connected RTL-SDR receiver to use")
                 .mandatory()
             // Tuning
             .int_param(SPC_SDR_CENTER_FREQ, "Center Freq (Hz)", 500000, 1766000000, 100000000, 1000, SPC_SDR_GROUP_TUNING)
-                .param_description("Receiver center frequency in Hz (24 MHz - 1.766 GHz)")
+                .param_help("Receiver center frequency in Hz (24 MHz - 1.766 GHz)")
             .int_param(SPC_SDR_SAMPLE_RATE, "Sample Rate (Hz)", 225001, 3200000, 2048000, 1000, SPC_SDR_GROUP_TUNING)
-                .param_description("ADC sample rate in Hz (higher = wider bandwidth, more CPU)")
+                .param_help("ADC sample rate in Hz (higher = wider bandwidth, more CPU)")
             .int_param(SPC_SDR_BANDWIDTH, "IF Bandwidth (Hz)", 0, 3200000, 0, 10000, SPC_SDR_GROUP_TUNING)
-                .param_description("IF bandwidth in Hz (0 = automatic, matched to sample rate)")
+                .param_help("IF bandwidth in Hz (0 = automatic, matched to sample rate)")
             // Gain
             .bool_param(SPC_SDR_AGC_ENABLED, "AGC", true, SPC_SDR_GROUP_GAIN)
-                .param_description("Automatic gain control")
+                .param_help("Automatic gain control")
             // Gain as a device-independent dB float (snapped to the nearest
             // hardware step when applied). Avoids the dynamic device-table enum,
             // whose options don't exist until the radio runs — which clamped a
             // saved gain index on every stopped save/load.
             .float_param(SPC_SDR_GAIN, "Manual Gain (dB)", 0.0f, 50.0f, 30.0f, 0.1f, SPC_SDR_GROUP_GAIN)
-                .param_description("Manual tuner gain in dB, snapped to the nearest step the device supports (active when AGC is off)")
+                .param_help("Manual tuner gain in dB, snapped to the nearest step the device supports (active when AGC is off)")
             // Hardware
             .enum_param(SPC_SDR_DIRECT_SAMPLING, "Direct Sampling", {"Off", "I-ADC", "Q-ADC"}, 0, SPC_SDR_GROUP_HARDWARE)
-                .param_description("Direct sampling mode for HF reception below 24 MHz (V3 only)")
+                .param_help("Direct sampling mode for HF reception below 24 MHz (V3 only)")
             .bool_param("offset_tuning", "Offset Tuning", false, SPC_SDR_GROUP_HARDWARE)
-                .param_description("Avoid DC spike at center frequency for zero-IF tuners")
+                .param_help("Avoid DC spike at center frequency for zero-IF tuners")
             .bool_param(SPC_SDR_BIAS_TEE, "Bias-T", false, SPC_SDR_GROUP_HARDWARE)
-                .param_description("Enable bias-T voltage output on GPIO 0 for active antennas/LNAs")
+                .param_help("Enable bias-T voltage output on GPIO 0 for active antennas/LNAs")
             .int_param(SPC_SDR_FREQ_CORRECTION, "Freq Correction (PPM)", -100, 100, 0, 1, SPC_SDR_GROUP_HARDWARE)
-                .param_description("Frequency correction in parts per million for crystal offset")
+                .param_help("Frequency correction in parts per million for crystal offset")
             .bool_param(SPC_SDR_DITHERING, "Frequency Dithering", true, SPC_SDR_GROUP_HARDWARE)
-                .param_description("R820T/R820T2 only; the tuner rejects it on a V4's R828D. On "
-                                   "spreads the fractional-N PLL's spurs into a noise pedestal, "
-                                   "which is what you want for general reception. Off leaves "
-                                   "discrete spurs but holds the tuner's phase steady, which is "
-                                   "what narrowband or phase-sensitive work needs — a coherent "
-                                   "array requires it off, and kraken_sdr forces it")
+                .param_help("R820T/R820T2 only; the tuner rejects it on a V4's R828D. On "
+                            "spreads the fractional-N PLL's spurs into a noise pedestal, "
+                            "which is what you want for general reception. Off leaves "
+                            "discrete spurs but holds the tuner's phase steady, which is "
+                            "what narrowband or phase-sensitive work needs — a coherent "
+                            "array requires it off, and kraken_sdr forces it")
             .bool_param("test_mode", "Test Mode", false, SPC_SDR_GROUP_HARDWARE)
-                .param_description("Output 8-bit counter instead of samples (debug)")
+                .param_help("Output 8-bit counter instead of samples (debug)")
             .int_param("if_gain", "IF Gain (0.1 dB)", -30, 90, 0, 10, SPC_SDR_GROUP_HARDWARE)
-                .param_description("Intermediate frequency gain in tenths of dB (E4000 tuner only)")
+                .param_help("Intermediate frequency gain in tenths of dB (E4000 tuner only)")
             .build_into(g_desc);
 
         scan_devices(nullptr);
@@ -386,7 +386,7 @@ static int set_parameter(SpcPluginInstance* inst, const char* name,
         return 0;
     }
 
-    return SPC_ERR_NOT_FOUND;
+    return SPC_NOT_FOUND;
 }
 
 static void param_rules(const SpcValue* values, uint32_t* states)
@@ -404,10 +404,10 @@ static void param_rules(const SpcValue* values, uint32_t* states)
 }
 
 static int list_options(uint32_t param, const SpcValue*, int refresh,
-                        const SpcHostServices* host_services,
+                        SpcHost* host_services,
                         SpcOptionSinkFn sink, void* sink_ctx)
 {
-    if (param != spc::param_index(get_descriptor(), "device")) return SPC_ERR_NOT_FOUND;
+    if (param != spc::param_index(get_descriptor(), "device")) return SPC_NOT_FOUND;
     if (refresh) scan_devices(host_services);
     for (int i = 0; i < g_registry.count; ++i)
         sink(sink_ctx, g_registry.ids[i], g_registry.devices[i].label);
@@ -509,20 +509,20 @@ static int stop(SpcPluginInstance* inst)
 // Phase-1 abort (engine two-phase contract): interrupt the blocking async read
 // so stop() is prompt and never waits a read timeout / gets detached. Runs
 // concurrently with process(); only kicks librtlsdr's cancel, frees nothing.
-static int request_stop(SpcPluginInstance* inst)
+static void request_stop(SpcPluginInstance* inst)
 {
     auto* s = state(inst);
     if (s->device) s->device->request_stop_streaming();
-    return 0;
 }
 
 // ── process ─────────────────────────────────────────────────────────
 
 static constexpr uint32_t BATCH_SIZE = 4096;
 
-static int process(SpcPluginInstance* inst, const SpcData*, uint32_t,
-                   SpcData* outputs, uint32_t output_count)
+static int process(SpcPluginInstance* inst, SpcStep* step)
 {
+    SpcData* outputs = step->outputs;
+    const uint32_t output_count = step->output_count;
     auto* s = state(inst);
     if (output_count < 1) return -1;
 
@@ -565,8 +565,8 @@ static int process(SpcPluginInstance* inst, const SpcData*, uint32_t,
 
 // ── export ──────────────────────────────────────────────────────────
 
-SPC_PLUGIN_VTABLE(
-    .get_descriptor     = get_descriptor,
+SPC_EXPORT_PLUGIN(
+    .info               = get_descriptor,
     .create_instance    = create_instance,
     .destroy_instance   = destroy_instance,
     .params_changed    = spc::params_by_name<get_descriptor, set_parameter>,
@@ -576,5 +576,5 @@ SPC_PLUGIN_VTABLE(
     .start              = start,
     .stop               = stop,
     .set_host_services  = set_host_services,
-    .request_stop       = request_stop
+    .interrupt          = request_stop
 )

@@ -323,7 +323,7 @@ inline void render_aircraft_list(
 // returns 0 if event consumed, -1 if not
 // if a row is clicked, sets out_lat/out_lon to center on that aircraft
 inline int handle_list_event(
-    const SpcInputEvent* event,
+    const SpcUiInput* event,
     int panel_x, int panel_y, int panel_w, int panel_h,
     int canvas_w, int canvas_h,
     ListPanelState& state,
@@ -343,7 +343,7 @@ inline int handle_list_event(
     int visible_rows = data_h / ROW_H;
 
     switch (event->type) {
-        case SPC_INPUT_EVENT_MOUSE_WHEEL: {
+        case SPC_UI_MOUSE_WHEEL: {
             int delta = (event->mouse.wheel_delta > 0) ? -3 : 3;
             state.scroll_offset += delta;
             int max_scroll = std::max(0, static_cast<int>(aircraft.size()) - visible_rows);
@@ -351,7 +351,7 @@ inline int handle_list_event(
             return 0;
         }
 
-        case SPC_INPUT_EVENT_MOUSE_PRESS: {
+        case SPC_UI_MOUSE_PRESS: {
             if (!(event->mouse.button & SPC_MOUSE_BUTTON_LEFT))
                 return 0;
 
@@ -406,7 +406,7 @@ inline int handle_list_event(
             return 0;
         }
 
-        case SPC_INPUT_EVENT_MOUSE_MOVE: {
+        case SPC_UI_MOUSE_MOVE: {
             int local_y = static_cast<int>(my) - panel_y;
             if (local_y >= HEADER_H && local_y < HEADER_H + data_h) {
                 int row = (local_y - HEADER_H) / ROW_H;

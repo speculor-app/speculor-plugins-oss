@@ -78,7 +78,7 @@ bool SubsenseGpuPipeline::init(VulkanContext& ctx)
 
 bool SubsenseGpuPipeline::prepare(VulkanContext& ctx, uint32_t width, uint32_t height,
                                    int num_channels, int bg_samples,
-                                   const SpcHostServices* host, void* edge_ring_ctx)
+                                   SpcGpuPass* pass)
 {
     if (width == width_ && height == height_ &&
         num_channels == num_channels_ && bg_samples == bg_samples_)
@@ -88,10 +88,10 @@ bool SubsenseGpuPipeline::prepare(VulkanContext& ctx, uint32_t width, uint32_t h
     wait_timeline_idle(ctx);
 
     // free old buffers (input upload + output are engine-owned ring slots now)
-    spc::gpu::free_after_frames(ctx, host, edge_ring_ctx, staging_mask_);
+    spc::gpu::free_after_frames(ctx, pass, staging_mask_);
     for (int i = 0; i < NUM_BUFFERS; ++i)
-        spc::gpu::free_after_frames(ctx, host, edge_ring_ctx, bufs_[i], mems_[i]);
-    spc::gpu::free_after_frames(ctx, host, edge_ring_ctx, packed_mask_buf_, packed_mask_mem_);
+        spc::gpu::free_after_frames(ctx, pass, bufs_[i], mems_[i]);
+    spc::gpu::free_after_frames(ctx, pass, packed_mask_buf_, packed_mask_mem_);
 
     width_ = width;
     height_ = height;

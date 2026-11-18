@@ -66,7 +66,7 @@ SPC_PLUGIN_HOST_SERVICES(SubsenseBgsState, host)
 SPC_PLUGIN_DESCRIPTOR(
     spc::DescriptorBuilder("subsense_bgs", "SuBSENSE BGS", "Analysis/Motion")
         .author("Speculor").version("0.2.0")
-        .description("SuBSENSE background subtraction — high-quality color+texture BGS with adaptive per-pixel sensitivity (quality mode, not real-time at full resolution)")
+        .help("SuBSENSE background subtraction — high-quality color+texture BGS with adaptive per-pixel sensitivity (quality mode, not real-time at full resolution)")
         .maturity(SPC_MATURITY_EXPERIMENTAL)
         .tags({"image", "tracking", "surveillance"})
         .input("image_in", "Image", SPC_DATA_FRAME, 32, SPC_CONSUME_FIFO)
@@ -75,18 +75,17 @@ SPC_PLUGIN_DESCRIPTOR(
         .output("image_out", "Image", SPC_DATA_FRAME)
         .gpu_compute()
         .int_param("bg_samples", "BG Samples", 10, 100, 50, 5, "SuBSENSE")
-            .param_description("Number of background samples per pixel (restarts model on change)")
+            .param_help("Number of background samples per pixel (restarts model on change)")
         .int_param("required_matches", "Required Matches", 1, 10, 2, 1, "SuBSENSE")
-            .param_description("Minimum matching background samples to classify as background")
+            .param_help("Minimum matching background samples to classify as background")
         .float_param("initial_color_threshold", "Color Threshold", 1.0f, 255.0f, 30.0f, 1.0f, "SuBSENSE")
-            .param_description("Initial per-pixel color distance threshold (adapts over time on CPU, fixed on GPU)")
+            .param_help("Initial per-pixel color distance threshold (adapts over time on CPU, fixed on GPU)")
         .int_param("initial_desc_threshold", "Descriptor Threshold", 1, 16, 3, 1, "SuBSENSE")
-            .param_description("Initial LBSP hamming distance threshold (adapts over time on CPU, fixed on GPU)")
+            .param_help("Initial LBSP hamming distance threshold (adapts over time on CPU, fixed on GPU)")
         .float_param("learning_rate_lower", "LR Lower Bound", 0.001f, 1.0f, 0.01f, 0.001f, "SuBSENSE")
-            .param_description("Minimum adaptive learning rate per pixel (CPU only)")
+            .param_help("Minimum adaptive learning rate per pixel (CPU only)")
         .float_param("learning_rate_upper", "LR Upper Bound", 0.001f, 1.0f, 0.1f, 0.001f, "SuBSENSE")
-            .param_description("Maximum adaptive learning rate per pixel (CPU only)")
-        .frame_alloc()
+            .param_help("Maximum adaptive learning rate per pixel (CPU only)")
 )
 
 // --- lifecycle ---
@@ -304,9 +303,12 @@ static bool mask_usable(SubsenseBgsState* s, uint32_t w, uint32_t h)
 
 // --- process ---
 
-static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t input_count,
-                   SpcData* outputs, uint32_t output_count)
+static int process(SpcPluginInstance* inst, SpcStep* step)
 {
+    const SpcData* inputs = step->inputs;
+    const uint32_t input_count = step->input_count;
+    SpcData* outputs = step->outputs;
+    const uint32_t output_count = step->output_count;
     auto* s = state(inst);
 
     thread_local bool bridge_installed = false;
@@ -316,7 +318,7 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t inpu
     }
 
     if (input_count < 1 || output_count < 2) return -1;
-    if (inputs[0].type != SPC_DATA_FRAME || !inputs[0].frame) return SPC_NO_DATA;
+    if (inputs[0].type != SPC_DATA_FRAME || !inputs[0].frame) return SPC_SKIP;
 
     // apply any GUI-thread parameter change to the worker-owned detector
     if (s->params_dirty.exchange(false, std::memory_order_acquire))
@@ -348,7 +350,7 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t inpu
     auto h = static_cast<uint32_t>(in_frame->height);
     const bool use_mask = mask_usable(s, w, h);
 
-    SpcFrame* out = s->host.acquire_frame(0, w, h, SPC_PIXEL_FORMAT_GRAY8);
+    SpcFrame* out = s->host.frame(0, w, h, SPC_PIXEL_FORMAT_GRAY8);
     if (out)
     {
         // A view local to this call: the frame is the engine's once it is on
@@ -356,7 +358,7 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t inpu
         cv::Mat fg_mask(static_cast<int>(h), static_cast<int>(w), CV_8UC1, out->data);
         s->subsense->apply(s->input_image, fg_mask,
                            use_mask ? s->cached_mask : s->empty_mask);
-        out->frame_number = in_frame->frame_number;
+        out->sequence = in_frame->sequence;
         out->timestamp_ns = in_frame->timestamp_ns;
         outputs[0].type = SPC_DATA_FRAME;
         outputs[0].frame = out;
@@ -370,7 +372,7 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t inpu
                        use_mask ? s->cached_mask : s->empty_mask);
     const cv::Mat& fg_mat = s->fg_mask;
     spc::mat_to_frame(fg_mat, &s->output_frame, SPC_PIXEL_FORMAT_GRAY8,
-                     in_frame->frame_number, in_frame->timestamp_ns);
+                     in_frame->sequence, in_frame->timestamp_ns);
     outputs[0].type = SPC_DATA_FRAME;
     outputs[0].frame = &s->output_frame;
     outputs[1].type = SPC_DATA_FRAME;
@@ -392,13 +394,13 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t inpu
 // NOT already GPU-resident (gpu_input == NULL). SuBSENSE is 8-bit only (1
 // byte/channel). Returns false if the host has no edge-ring service or the
 // allocation failed (caller demotes to CPU).
-static bool acquire_input_upload(SubsenseBgsState* s, SpcGpuRecordCtx* rctx,
+static bool acquire_input_upload(SubsenseBgsState* s, SpcGpuPass* pass,
                                  const SpcFrame* in_frame, int num_channels,
                                  VkBuffer& in_device, VkBuffer& in_staging)
 {
     in_device = VK_NULL_HANDLE;
     in_staging = VK_NULL_HANDLE;
-    if (!rctx->edge_ring_ctx) return false;
+    if (!pass) return false;
     const uint32_t w = static_cast<uint32_t>(in_frame->width);
     const uint32_t h = static_cast<uint32_t>(in_frame->height);
     const int row_bytes = static_cast<int>(w) * num_channels;
@@ -407,8 +409,8 @@ static bool acquire_input_upload(SubsenseBgsState* s, SpcGpuRecordCtx* rctx,
     // are memcpy'd in. Sizing staging at the unpadded frame size would overrun
     // on the padded device copy.
     const uint64_t ring_bytes = static_cast<uint64_t>(s->gpu_pipeline->input_device_size());
-    SpcGpuEdgeBuffer up = s->host.acquire_ringed_upload(
-        rctx->edge_ring_ctx, 0, ring_bytes, ring_bytes);
+    SpcGpuEdgeBuffer up = spc::acquire_ringed_upload(
+        pass, 0, ring_bytes, ring_bytes);
     if (!up.device_buffer || !up.staging_buffer || !up.staging_mapped) return false;
     auto* dst = static_cast<uint8_t*>(up.staging_mapped);
     const auto* src = in_frame->data;
@@ -423,22 +425,22 @@ static bool acquire_input_upload(SubsenseBgsState* s, SpcGpuRecordCtx* rctx,
     return true;
 }
 
-static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
+static int record_gpu(SpcPluginInstance* inst, SpcStep* step, SpcGpuPass* pass)
 {
     auto* s = state(inst);
-    if (!rctx) return -1;
-    if (rctx->input_count < 1 || rctx->output_count < 2) return -1;
-    if (rctx->inputs[0].type != SPC_DATA_FRAME || !rctx->inputs[0].frame) return -1;
+    if (!step || !pass) return -1;
+    if (step->input_count < 1 || step->output_count < 2) return -1;
+    if (step->inputs[0].type != SPC_DATA_FRAME || !step->inputs[0].frame) return -1;
     if (!s->gpu_available || !s->gpu_ctx || !s->gpu_pipeline) return -1;
 
     const Params p = s->params.snapshot();  // one consistent view per frame
 
-    const SpcFrame* in_frame = rctx->inputs[0].frame;
+    const SpcFrame* in_frame = step->inputs[0].frame;
     int cv_type = spc::cv_type_for_format(in_frame->format);
     if (cv_type < 0) return -1;
 
-    if (rctx->input_count > 1 && rctx->inputs[1].type == SPC_DATA_FRAME && rctx->inputs[1].frame) {
-        if (cache_detect_mask(s, rctx->inputs[1].frame))
+    if (step->input_count > 1 && step->inputs[1].type == SPC_DATA_FRAME && step->inputs[1].frame) {
+        if (cache_detect_mask(s, step->inputs[1].frame))
             s->gpu_pipeline->mark_mask_dirty();  // re-upload the new mask once
     }
 
@@ -455,7 +457,7 @@ static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
     }
 
     if (!s->gpu_pipeline->prepare(*s->gpu_ctx, w, h, num_channels, p.bg_samples,
-                                  s->host.svc, rctx->edge_ring_ctx))
+                                  pass))
         return -1;
 
     bool input_on_gpu = in_frame->gpu_handle != 0 &&
@@ -475,14 +477,14 @@ static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
     pc.desc_threshold = p.initial_desc_threshold;
     pc.required_matches = p.required_matches;
     pc.learning_rate = 16;
-    pc.frame_number = s->gpu_frame_counter++;
+    pc.sequence = s->gpu_frame_counter++;
     pc.has_mask = use_mask ? 1 : 0;
     pc.width4 = (static_cast<int32_t>(w) + 3) / 4;
 
-    auto cmd = static_cast<VkCommandBuffer>(rctx->cmd_buffer_handle);
+    auto cmd = static_cast<VkCommandBuffer>(pass->cmd_buffer_handle);
     if (!cmd) return -1;
 
-    SpcFrame* out = s->host.acquire_frame(0, w, h, SPC_PIXEL_FORMAT_GRAY8);
+    SpcFrame* out = s->host.frame(0, w, h, SPC_PIXEL_FORMAT_GRAY8);
     if (!out) return -1;
 
     // Acquire the engine-owned OUTPUT ring slot for this frame (binding 4 +
@@ -490,9 +492,9 @@ static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
     // the returned gpu_handle, so the post-submit invalidate covers it and
     // downstream consumers resolve it by handle. Acquired for the init frame
     // too so the init dispatch's binding 4 is a valid buffer.
-    if (!rctx->edge_ring_ctx) { s->host.release_frame(out); return -1; }
-    SpcGpuEdgeBuffer outbuf = s->host.acquire_ringed_output(
-        rctx->edge_ring_ctx, 0, w, h, out->stride, SPC_PIXEL_FORMAT_GRAY8,
+    if (!pass) { s->host.release_frame(out); return -1; }
+    SpcGpuEdgeBuffer outbuf = spc::acquire_ringed_output(
+        pass, 0, w, h, out->stride, SPC_PIXEL_FORMAT_GRAY8,
         static_cast<uint64_t>(s->gpu_pipeline->output_device_size()),
         static_cast<uint64_t>(s->gpu_pipeline->output_staging_size()));
     // staging may be null — only the device buffer + registry handle are required
@@ -505,7 +507,7 @@ static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
     // GPU-resident input → device-to-device, no upload ring.
     VkBuffer in_device = VK_NULL_HANDLE, in_staging = VK_NULL_HANDLE;
     if (gpu_input_buf == VK_NULL_HANDLE &&
-        !acquire_input_upload(s, rctx, in_frame, num_channels, in_device, in_staging)) {
+        !acquire_input_upload(s, pass, in_frame, num_channels, in_device, in_staging)) {
         s->host.release_frame(out);
         return -1;
     }
@@ -524,12 +526,12 @@ static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
             return -1;
         }
         std::memset(out->data, 0, static_cast<size_t>(out->stride) * h);
-        out->frame_number = in_frame->frame_number;
+        out->sequence = in_frame->sequence;
         out->timestamp_ns = in_frame->timestamp_ns;
-        rctx->outputs[0].type = SPC_DATA_FRAME;
-        rctx->outputs[0].frame = out;
-        rctx->outputs[1].type = SPC_DATA_FRAME;
-        rctx->outputs[1].frame = const_cast<SpcFrame*>(in_frame);
+        step->outputs[0].type = SPC_DATA_FRAME;
+        step->outputs[0].frame = out;
+        step->outputs[1].type = SPC_DATA_FRAME;
+        step->outputs[1].frame = const_cast<SpcFrame*>(in_frame);
         return 0;
     }
 
@@ -542,8 +544,8 @@ static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
 
     SpcGpuEdgeBuffer mask_up{};
     if (mask_ptr)
-        mask_up = s->host.acquire_ringed_scratch(rctx->edge_ring_ctx, 0, SPC_GPU_SCRATCH_UPLOAD,
-                                                 static_cast<uint64_t>(s->gpu_pipeline->packed_mask_bytes()));
+        mask_up = spc::acquire_ringed_scratch(pass, 0, SPC_GPU_SCRATCH_UPLOAD,
+                                              static_cast<uint64_t>(s->gpu_pipeline->packed_mask_bytes()));
     if (!s->gpu_pipeline->record(*s->gpu_ctx, cmd,
                                   in_device, in_staging,
                                   static_cast<VkBuffer>(outbuf.device_buffer),
@@ -557,19 +559,19 @@ static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
     // handle (same fields GpuOutputHandle::bind_to_frame set on the prior path).
     out->gpu_handle   = outbuf.gpu_handle;
     out->gpu_flags   |= SPC_GPU_FLAG_RESIDENT;
-    out->frame_number = in_frame->frame_number;
+    out->sequence     = in_frame->sequence;
     out->timestamp_ns = in_frame->timestamp_ns;
-    rctx->outputs[0].type = SPC_DATA_FRAME;
-    rctx->outputs[0].frame = out;
-    rctx->outputs[1].type = SPC_DATA_FRAME;
-    rctx->outputs[1].frame = const_cast<SpcFrame*>(in_frame);
+    step->outputs[0].type = SPC_DATA_FRAME;
+    step->outputs[0].frame = out;
+    step->outputs[1].type = SPC_DATA_FRAME;
+    step->outputs[1].frame = const_cast<SpcFrame*>(in_frame);
     return 0;
 }
 #endif
 
 #ifdef SPC_HAS_VULKAN
-SPC_PLUGIN_VTABLE(
-    .get_descriptor    = get_descriptor,
+SPC_EXPORT_PLUGIN(
+    .info              = get_descriptor,
     .create_instance   = create_instance,
     .destroy_instance  = destroy_instance,
     .params_changed    = spc::params_by_name<get_descriptor, set_parameter>,
@@ -580,8 +582,8 @@ SPC_PLUGIN_VTABLE(
     .record_gpu        = record_gpu
 )
 #else
-SPC_PLUGIN_VTABLE(
-    .get_descriptor    = get_descriptor,
+SPC_EXPORT_PLUGIN(
+    .info              = get_descriptor,
     .create_instance   = create_instance,
     .destroy_instance  = destroy_instance,
     .params_changed    = spc::params_by_name<get_descriptor, set_parameter>,

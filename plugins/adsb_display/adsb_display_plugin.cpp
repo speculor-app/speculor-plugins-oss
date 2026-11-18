@@ -31,7 +31,7 @@ using Params = MapDisplayState::Params;
 SPC_PLUGIN_DESCRIPTOR(
     spc::DescriptorBuilder("adsb_display", "ADS-B Display", "ADS-B/Visualization")
         .author("Speculor").version("0.1.0")
-        .description("Renders ADS-B aircraft positions on an OpenStreetMap tile map")
+        .help("Renders ADS-B aircraft positions on an OpenStreetMap tile map")
         .maturity(SPC_MATURITY_STABLE)
         .tags({"ads-b", "tracking"})
         // field order is mirrored by AircraftField / GpsField in input_parser.cpp
@@ -84,116 +84,115 @@ SPC_PLUGIN_DESCRIPTOR(
             {"origin_icao",     SPC_FIELD_STRING32},
             {"dest_icao",       SPC_FIELD_STRING32},
         }, 4, SPC_CONSUME_NON_BLOCKING)
-        .input("enrichment_in", "Enrichment", SPC_DATA_RECORD, 1, SPC_CONSUME_NON_BLOCKING)
+        .input("enrichment_in", "Enrichment", SPC_DATA_JSON, 1, SPC_CONSUME_NON_BLOCKING)
         .input_table("gps_in", "GPS Position", {
             {"latitude",  SPC_FIELD_FLOAT64},
             {"longitude", SPC_FIELD_FLOAT64},
         }, 1, SPC_CONSUME_NON_BLOCKING)
         .output("map_out", "Map", SPC_DATA_FRAME)
         .enum_param("view_mode", "View Mode", {"Auto", "Manual"}, 0, "View")
-            .param_description("Auto centers on all aircraft, Manual uses fixed coordinates")
+            .param_help("Auto centers on all aircraft, Manual uses fixed coordinates")
         .float64_param("center_lat", "Center Latitude", -90.0, 90.0, 51.5, 0.001, "View")
-            .param_description("Map center latitude in Manual view mode")
+            .param_help("Map center latitude in Manual view mode")
         .float64_param("center_lon", "Center Longitude", -180.0, 180.0, -0.1, 0.001, "View")
-            .param_description("Map center longitude in Manual view mode")
+            .param_help("Map center longitude in Manual view mode")
         .float_param("zoom", "Zoom", 2.0f, 18.0f, 6.0f, 0.1f, "View")
-            .param_description("Map zoom level (higher = more detail, smaller area)")
+            .param_help("Map zoom level (higher = more detail, smaller area)")
         .float_param("radius", "Radius (km)", 1.0f, 5000.0f, 50.0f, 1.0f, "View")
-            .param_description("Display radius in kilometers for range ring calculation")
+            .param_help("Display radius in kilometers for range ring calculation")
         .int_param("width", "Width", 320, 3840, 1200, 10, "View")
-            .param_description("Output frame width in pixels")
+            .param_help("Output frame width in pixels")
         .int_param("height", "Height", 240, 2160, 800, 10, "View")
-            .param_description("Output frame height in pixels")
+            .param_help("Output frame height in pixels")
         .enum_param("map_style", "Map Style",
                     {"Standard", "Humanitarian", "Dark", "Light", "Topo", "Custom"},
                     2, "Tiles")
-            .param_description("Map tile source and visual style")
+            .param_help("Map tile source and visual style")
         .string_param("custom_server", "Custom Server", "tile.openstreetmap.org", "Tiles")
-            .param_description("Custom tile server hostname (e.g. tile.openstreetmap.org)")
+            .param_help("Custom tile server hostname (e.g. tile.openstreetmap.org)")
         .float_param("icon_scale", "Icon Scale", 0.3f, 5.0f, 1.0f, 0.1f, "Display")
-            .param_description("Aircraft icon size multiplier")
+            .param_help("Aircraft icon size multiplier")
         .float_param("font_size", "Font Size", 0.1f, 2.0f, 0.35f, 0.05f, "Display")
-            .param_description("Aircraft label font size multiplier")
+            .param_help("Aircraft label font size multiplier")
         .enum_param("unit_system", "Units", {"Imperial", "Metric"}, 1, "Display")
-            .param_description("Unit system: Imperial (ft, kts, fpm) or Metric (m, km/h, m/min)")
+            .param_help("Unit system: Imperial (ft, kts, fpm) or Metric (m, km/h, m/min)")
         .bool_param("show_labels", "Show Labels", true, "Display")
-            .param_description("Show callsign and altitude labels on aircraft")
+            .param_help("Show callsign and altitude labels on aircraft")
         .bool_param("show_trails", "Show Trails", true, "Display")
-            .param_description("Draw position history trail behind each aircraft")
+            .param_help("Draw position history trail behind each aircraft")
         .int_param("trail_length", "Trail Length", 5, 300, 30, 5, "Display")
-            .param_description("Number of trail points to keep per aircraft")
+            .param_help("Number of trail points to keep per aircraft")
         .bool_param("show_trend_vector", "Show Trend Vector", true, "Display")
-            .param_description("Line ahead of each aircraft projecting its position forward")
+            .param_help("Line ahead of each aircraft projecting its position forward")
         .float_param("trend_seconds", "Trend Seconds", 10.0f, 180.0f, 15.0f, 5.0f, "Display")
-            .param_description("How many seconds ahead the trend-vector line projects")
+            .param_help("How many seconds ahead the trend-vector line projects")
         .bool_param("show_vs_indicator", "Show Vertical Speed", true, "Display")
-            .param_description("Climb/descent arrow + rate next to the altitude label")
+            .param_help("Climb/descent arrow + rate next to the altitude label")
         .bool_param("show_staleness_fade", "Fade Stale Tracks", true, "Display")
-            .param_description("Fade aircraft whose data is going stale before they expire")
+            .param_help("Fade aircraft whose data is going stale before they expire")
         .int_param("filter_alt_min", "Min Altitude (ft)", 0, 60000, 0, 100, "Filters")
-            .param_description("Hide airborne aircraft below this altitude (feet, independent of unit system)")
+            .param_help("Hide airborne aircraft below this altitude (feet, independent of unit system)")
         .int_param("filter_alt_max", "Max Altitude (ft)", 0, 60000, 0, 100, "Filters")
-            .param_description("Hide airborne aircraft above this altitude (feet, 0 = unlimited)")
+            .param_help("Hide airborne aircraft above this altitude (feet, 0 = unlimited)")
         .float_param("filter_distance_max_km", "Max Distance (km)", 0.0f, 5000.0f, 0.0f, 1.0f, "Filters")
-            .param_description("Hide aircraft farther than this from the receiver (0 = unlimited)")
+            .param_help("Hide aircraft farther than this from the receiver (0 = unlimited)")
         .bool_param("filter_show_ground", "Show Ground Traffic", true, "Filters")
-            .param_description("Include aircraft reporting on-ground status")
+            .param_help("Include aircraft reporting on-ground status")
         .bool_param("filter_military_only", "Military Only", false, "Filters")
-            .param_description("Show only aircraft flagged as military in the ICAO DB")
+            .param_help("Show only aircraft flagged as military in the ICAO DB")
         .string_param("filter_callsign_substr", "Callsign Contains", "", "Filters")
-            .param_description("Show only aircraft whose callsign contains this text (case-insensitive; empty = all)")
+            .param_help("Show only aircraft whose callsign contains this text (case-insensitive; empty = all)")
         .bool_param("show_airports", "Show Airports", true, "Airports")
-            .param_description("Plot airport markers from the fetched reference dataset")
+            .param_help("Plot airport markers from the fetched reference dataset")
         .enum_param("airport_min_type", "Airport Detail",
                     {"Large only", "Large + Medium", "All"}, 1, "Airports")
-            .param_description("How many airport size tiers to draw (small airports and heliports also gate on zoom)")
+            .param_help("How many airport size tiers to draw (small airports and heliports also gate on zoom)")
         .bool_param("show_origin_dest_highlight", "Highlight Origin/Dest", true, "Airports")
-            .param_description("For the selected aircraft, accent its origin and destination airports and draw a line to the destination")
+            .param_help("For the selected aircraft, accent its origin and destination airports and draw a line to the destination")
         .bool_param("show_airspace", "Show Airspace", false, "Airspace")
-            .param_description("Overlay airspace polygons (FIR/CTR/TMA/P-R-D/MATZ) if data was fetched at build time")
+            .param_help("Overlay airspace polygons (FIR/CTR/TMA/P-R-D/MATZ) if data was fetched at build time")
         .enum_param("airspace_classes", "Airspace Classes",
                     {"None", "Controlled", "Restricted", "All"}, 3, "Airspace")
-            .param_description("Which airspace categories to show. Controlled = FIR/CTR/TMA etc; Restricted = P/R/D/MATZ.")
+            .param_help("Which airspace categories to show. Controlled = FIR/CTR/TMA etc; Restricted = P/R/D/MATZ.")
         .float_param("airspace_opacity", "Airspace Opacity", 0.0f, 1.0f, 0.10f, 0.05f, "Airspace")
-            .param_description("Fill opacity for airspace polygons (outlines always full opacity)")
+            .param_help("Fill opacity for airspace polygons (outlines always full opacity)")
         .int_param("airspace_altitude_ft", "Altitude Filter (ft)", 0, 60000, 0, 500, "Airspace")
-            .param_description("Show only airspaces whose floor/ceiling bracket this altitude. 0 = no filter.")
+            .param_help("Show only airspaces whose floor/ceiling bracket this altitude. 0 = no filter.")
         .bool_param("show_range_rings", "Show Range Rings", true, "Range Rings")
-            .param_description("Draw concentric distance rings on the map")
+            .param_help("Draw concentric distance rings on the map")
         .float_param("range_ring_interval", "Interval (km)", 1.0f, 100.0f, 20.0f, 1.0f, "Range Rings")
-            .param_description("Distance between range rings in kilometers")
+            .param_help("Distance between range rings in kilometers")
         .color_param("range_ring_color", "Ring Color", 0x00FF00FF, "Range Rings")
-            .param_description("Range ring line color")
+            .param_help("Range ring line color")
         .int_param("range_ring_thickness", "Ring Thickness", 1, 5, 1, 1, "Range Rings")
-            .param_description("Range ring line thickness in pixels")
+            .param_help("Range ring line thickness in pixels")
         .enum_param("range_ring_style", "Ring Style", {"Solid", "Dashed", "Dotted"}, 0, "Range Rings")
-            .param_description("Range ring line style")
+            .param_help("Range ring line style")
         .float_param("range_ring_opacity", "Ring Opacity", 0.0f, 1.0f, 0.15f, 0.05f, "Range Rings")
-            .param_description("Range ring transparency (0 = invisible, 1 = opaque)")
+            .param_help("Range ring transparency (0 = invisible, 1 = opaque)")
         .float_param("range_ring_font_size", "Ring Font Size", 0.1f, 2.0f, 0.30f, 0.05f, "Range Rings")
         // Max Range group
         .bool_param("show_max_range", "Show Max Range", true, "Max Range")
-            .param_description("Display a circle at the maximum distance any aircraft has been seen")
+            .param_help("Display a circle at the maximum distance any aircraft has been seen")
         .color_param("max_range_color", "Color", 0xFF6600FF, "Max Range")
         .float_param("max_range_opacity", "Opacity", 0.0f, 1.0f, 0.25f, 0.05f, "Max Range")
         .float_param("max_range_font_size", "Font Size", 0.1f, 2.0f, 0.30f, 0.05f, "Max Range")
-            .param_description("Font size for range ring distance labels")
+            .param_help("Font size for range ring distance labels")
         .float_param("info_font_size", "Font Size", 0.2f, 0.6f, 0.30f, 0.02f, "Info Panel")
-            .param_description("Font size for the aircraft info panel")
+            .param_help("Font size for the aircraft info panel")
         .float_param("info_panel_opacity", "Panel Opacity", 0.0f, 1.0f, 0.92f, 0.05f, "Info Panel")
-            .param_description("Opacity of the aircraft info panel background (0 = transparent, 1 = opaque)")
+            .param_help("Opacity of the aircraft info panel background (0 = transparent, 1 = opaque)")
         .bool_param("show_list", "Show Aircraft List", true, "Aircraft List")
-            .param_description("Show scrollable aircraft list panel on the right side")
+            .param_help("Show scrollable aircraft list panel on the right side")
         .int_param("list_width", "List Width", 150, 500, 220, 10, "Aircraft List")
-            .param_description("Width of the aircraft list panel in pixels")
+            .param_help("Width of the aircraft list panel in pixels")
         .list_param("waypoints", "Waypoints", "Map Waypoints")
-            .param_description("Points of interest drawn on the map (right-click map to add)")
+            .param_help("Points of interest drawn on the map (right-click map to add)")
             .list_column("name", "Name", SPC_PARAM_STRING)
             .list_column_enum("type", "Type", {"Waypoint", "Airport", "Military Base", "VOR", "NDB"})
             .list_column("lat", "Latitude", SPC_PARAM_FLOAT64, -90.0, 90.0, 0.0001)
             .list_column("lon", "Longitude", SPC_PARAM_FLOAT64, -180.0, 180.0, 0.0001)
             .list_column("alt", "Altitude (ft)", SPC_PARAM_FLOAT64, 0.0, 100000.0, 1.0)
-        .frame_alloc()
 )
 
 // ── lifecycle ──────────────────────────────────────────────────────────
@@ -398,7 +397,7 @@ static void param_rules(const SpcValue* values, uint32_t* states)
 
 void push_waypoints(MapDisplayState* s)
 {
-    const SpcPluginDescriptor* desc = get_descriptor();
+    const SpcNodeInfo* desc = get_descriptor();
     const uint32_t param = spc::param_index(desc, "waypoints");
     std::vector<SpcListRow> rows;
     {
@@ -466,7 +465,7 @@ static int start(SpcPluginInstance* inst)
 {
     auto* s = state(inst);
     const Params p = s->params.snapshot();
-    s->frame_number = 0;
+    s->sequence = 0;
     s->trail_history.trails.clear();
     s->trail_history.max_length = p.trail_length;
     s->cached_aircraft.clear();
@@ -552,11 +551,11 @@ static int stop(SpcPluginInstance* inst)
     s->screen_pos[0].clear();
     s->screen_pos[1].clear();
     SPC_LOG_INFO(&s->host.cached_log, "adsb display stopped (%llu frames)",
-                 static_cast<unsigned long long>(s->frame_number));
+                 static_cast<unsigned long long>(s->sequence));
     return 0;
 }
 
-SPC_PLUGIN_EVENT_HANDLER(MapDisplayState, handle_event)
+SPC_PLUGIN_UI_INPUT(MapDisplayState, handle_event)
 
 // ── process ────────────────────────────────────────────────────────────
 
@@ -705,9 +704,12 @@ static BackgroundKey compute_bg_key(MapDisplayState* s,
     return k;
 }
 
-static int process(SpcPluginInstance* inst, const SpcData* inputs,
-                   uint32_t input_count, SpcData* outputs, uint32_t output_count)
+static int process(SpcPluginInstance* inst, SpcStep* step)
 {
+    const SpcData* inputs = step->inputs;
+    const uint32_t input_count = step->input_count;
+    SpcData* outputs = step->outputs;
+    const uint32_t output_count = step->output_count;
     auto* s = state(inst);
     if (output_count < 1) return -1;
 
@@ -1271,25 +1273,25 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs,
     // approach: treat canvas as RGB throughout, convert decoded images on load instead
     auto now_ns = spc::clock::now_utc_ns(s->host);
 
-    SpcFrame* pool_frame = s->host.acquire_frame(
+    SpcFrame* pool_frame = s->host.frame(
         0, static_cast<uint32_t>(w), static_cast<uint32_t>(h), SPC_PIXEL_FORMAT_RGB24);
 
     if (pool_frame) {
         spc::copy_frame_rows(s->canvas.data, static_cast<uint32_t>(s->canvas.step[0]),
                              pool_frame->data, pool_frame->stride,
                              static_cast<uint32_t>(h));
-        pool_frame->frame_number = s->frame_number;
+        pool_frame->sequence = s->sequence;
         pool_frame->timestamp_ns = now_ns;
         outputs[0].type = SPC_DATA_FRAME;
         outputs[0].frame = pool_frame;
     } else {
         spc::mat_to_frame(s->canvas, &s->output_frame,
-                          SPC_PIXEL_FORMAT_RGB24, s->frame_number, now_ns);
+                          SPC_PIXEL_FORMAT_RGB24, s->sequence, now_ns);
         outputs[0].type = SPC_DATA_FRAME;
         outputs[0].frame = &s->output_frame;
     }
 
-    s->frame_number++;
+    s->sequence++;
 
     // a drag moves the centre on every mouse move: the host hears where it ended
     if (!s->drag_active.load(std::memory_order_relaxed)) push_view(s);
@@ -1298,8 +1300,8 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs,
     return 0;
 }
 
-SPC_PLUGIN_VTABLE(
-    .get_descriptor    = get_descriptor,
+SPC_EXPORT_PLUGIN(
+    .info              = get_descriptor,
     .create_instance   = create_instance,
     .destroy_instance  = destroy_instance,
     .params_changed    = params_changed,
@@ -1308,4 +1310,4 @@ SPC_PLUGIN_VTABLE(
     .start             = start,
     .stop              = stop,
     .set_host_services = set_host_services,
-    .on_input_event          = on_input_event)
+    .ui_input          = ui_input)

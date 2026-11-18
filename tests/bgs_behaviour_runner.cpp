@@ -83,7 +83,7 @@ const SpcFrame* run_frame(spc::testing::PluginUnderTest& p,
     in.height = kH;
     in.stride = kW;
     in.format = SPC_PIXEL_FORMAT_GRAY8;
-    in.frame_number = frame_no;
+    in.sequence = frame_no;
     in.timestamp_ns = static_cast<int64_t>(frame_no) * 33'000'000;
 
     SpcData input{};

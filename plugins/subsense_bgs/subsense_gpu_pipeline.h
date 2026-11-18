@@ -2,7 +2,7 @@
 
 #ifdef SPC_HAS_VULKAN
 
-#include <speculor/plugin_api.h>
+#include <speculor/plugin.h>
 #include <gpu/vulkan_context.h>
 #include <gpu/gpu_utils.h>
 #include <gpu/gpu_pipeline_base.h>
@@ -21,7 +21,7 @@ struct SubsensePushConstants
     int32_t desc_threshold;     // LBSP hamming distance threshold
     int32_t required_matches;   // min matches to classify as background
     int32_t learning_rate;      // 1/N update probability (e.g. 16 = 1/16)
-    uint32_t frame_number;      // frame counter
+    uint32_t sequence;          // frame counter
     int32_t has_mask;           // 1 if detection mask is provided
     int32_t width4;             // ceil(width/4)
     int32_t pad0;
@@ -41,11 +41,11 @@ public:
     bool init(VulkanContext& ctx);
 
     // prepare buffers for given frame dimensions (re-allocates if changed)
-    // From record_gpu pass the host services and SpcGpuRecordCtx::edge_ring_ctx:
-    // what a resize replaces is then freed once no frame in flight uses it.
+    // From record_gpu pass the node's SpcGpuPass: what a resize replaces is
+    // then freed once no frame in flight uses it.
     bool prepare(VulkanContext& ctx, uint32_t width, uint32_t height,
                  int num_channels, int bg_samples,
-                 const SpcHostServices* host = nullptr, void* edge_ring_ctx = nullptr);
+                 SpcGpuPass* pass = nullptr);
 
     // Engine-driven coalesced-submit init pass (first frame — fills background
     // model). Records upload + barrier + init dispatch into the supplied

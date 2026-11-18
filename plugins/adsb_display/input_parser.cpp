@@ -3,7 +3,7 @@
 #include "icao_country_db.h"
 #include "unit_format.h"
 
-#include <speculor/plugin_api.h>
+#include <speculor/plugin.h>
 #include <speculor/table_helpers.h>
 #include <nlohmann/json.hpp>
 
@@ -95,16 +95,16 @@ void parse_enrichment_record(MapDisplayState* s, const SpcData* inputs,
                              uint32_t input_count)
 {
     // enrichment_in is port 1 (after aircraft_in=0, before gps_in=2)
-    if (input_count < 2 || inputs[1].type != SPC_DATA_RECORD || !inputs[1].record)
+    if (input_count < 2 || inputs[1].type != SPC_DATA_JSON || !inputs[1].json)
         return;
-    const char* json = inputs[1].record->json;
+    const char* json = inputs[1].json->json;
     if (!json || !json[0]) return;
 
     // Dedup against the last parsed JSON. Aircraft Enricher emits the
     // same blob every tick; at ~50 KB the parse + ~15 string allocs per
     // entry was the single biggest CPU sink in this plugin (13 ms/frame
     // of 19 ms total). A memcmp of the same bytes is ~3 µs.
-    uint32_t length = inputs[1].record->length;
+    uint32_t length = inputs[1].json->length;
     if (length == 0) length = static_cast<uint32_t>(std::strlen(json));
     if (s->last_enrichment_json.size() == length &&
         std::memcmp(s->last_enrichment_json.data(), json, length) == 0) {

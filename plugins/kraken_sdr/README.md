@@ -24,7 +24,7 @@ Heimdall DAQ does. What it guarantees is *clean, frequency-coherent capture*:
 - **dithering forced off** (dithering breaks phase coherence);
 - the five async reads started back-to-back (near-simultaneous);
 - **lock-stepped, equal-size blocks** — a block is emitted only when *every* channel
-  has a full batch buffered, and all five ports carry the **same `frame_number` and
+  has a full batch buffered, and all five ports carry the **same `sequence` and
   `timestamp_ns`** so a downstream node can pair samples of the same block.
 
 ### Why this is fine for passive radar
@@ -74,7 +74,7 @@ in the block metadata) and forces a recalibration automatically.
 Five signal ports `iq_ch0 … iq_ch4`, each `{i:int16, q:int16}` (interleaved I/Q, one
 record per complex sample). Per-block metadata carries `sample_rate_hz`,
 `center_freq_hz`, `bandwidth_hz`, `gain_db`, `agc_enabled`, `bit_depth` (8, RTL
-native), and the shared `frame_number` / `timestamp_ns`.
+native), and the shared `sequence` / `timestamp_ns`.
 
 ## Device detection
 

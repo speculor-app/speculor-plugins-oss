@@ -2,7 +2,7 @@
 
 #ifdef SPC_HAS_VULKAN
 
-#include <speculor/plugin_api.h>
+#include <speculor/plugin.h>
 #include <gpu/vulkan_context.h>
 #include <gpu/gpu_utils.h>
 #include <gpu/gpu_pipeline_base.h>
@@ -22,7 +22,7 @@ struct VibePushConstants
     int32_t required_bg_samples;
     int32_t learning_rate_and;
     int32_t bg_samples_and;
-    uint32_t frame_number;
+    uint32_t sequence;
     int32_t bytes_per_channel;  // 1 = uint8, 2 = uint16
 };
 
@@ -40,11 +40,11 @@ public:
     bool init(VulkanContext& ctx);
 
     // prepare buffers for given frame dimensions (re-allocates if size changed)
-    // From record_gpu pass the host services and SpcGpuRecordCtx::edge_ring_ctx:
-    // what a resize replaces is then freed once no frame in flight uses it.
+    // From record_gpu pass the node's SpcGpuPass: what a resize replaces is
+    // then freed once no frame in flight uses it.
     bool prepare(VulkanContext& ctx, uint32_t width, uint32_t height,
                  int num_channels, int bytes_per_channel, int bg_samples,
-                 const SpcHostServices* host = nullptr, void* edge_ring_ctx = nullptr);
+                 SpcGpuPass* pass = nullptr);
 
     // Engine-driven coalesced first-frame init. Records the init upload +
     // init dispatch into the supplied secondary so the read of the input is

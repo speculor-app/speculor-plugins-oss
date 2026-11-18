@@ -69,10 +69,10 @@ const Expect k_expect[] = {
 };
 constexpr int k_expect_count = static_cast<int>(sizeof(k_expect) / sizeof(k_expect[0]));
 
-const SpcParam* find_param(const SpcPluginDescriptor* d, const char* name) {
+const SpcParam* find_param(const SpcNodeInfo* d, const char* name) {
     if (!d) return nullptr;
     for (uint32_t i = 0; i < d->param_count && i < SPC_PLUGIN_PARAM_MAX; ++i)
-        if (std::strcmp(d->params[i].name, name) == 0) return &d->params[i];
+        if (std::strcmp(d->params[i].id, name) == 0) return &d->params[i];
     return nullptr;
 }
 
@@ -115,7 +115,7 @@ bool read_scalar(spc::testing::PluginUnderTest& plugin, const char* name, int& o
     }
 }
 
-// A gated control must answer SPC_ERR_NOT_FOUND when the board does not have
+// A gated control must answer SPC_NOT_FOUND when the board does not have
 // it, and 0 when it does — and a rejected set must leave no trace. Reporting
 // "unsupported" while quietly keeping the value is the worse failure of the
 // two: it hands the next start() a setting the user was told was refused.
@@ -274,7 +274,7 @@ int main(int argc, char** argv) {
 
     // --- an unknown parameter is still rejected -----------------------------
     const SpcParameterDesc junk = make_bool(1);
-    check(plugin.set_parameter("no_such_param", &junk) == SPC_ERR_NOT_FOUND,
+    check(plugin.set_parameter("no_such_param", &junk) == SPC_NOT_FOUND,
           "unknown parameter name rejected");
 
     plugin.destroy();

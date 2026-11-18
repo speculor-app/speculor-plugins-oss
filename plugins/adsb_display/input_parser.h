@@ -3,7 +3,7 @@
 // Input-side helpers: field offsets, table row -> AircraftView
 // conversion, GPS position extraction, and enrichment-record parsing.
 
-#include <speculor/plugin_api.h>
+#include <speculor/plugin.h>
 
 #include <vector>
 #include <cstdint>
