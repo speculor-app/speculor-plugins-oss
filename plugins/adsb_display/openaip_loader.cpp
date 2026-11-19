@@ -12,15 +12,9 @@
 #include <string>
 
 // ── binary cache format ──────────────────────────────────────────────
-// Parsing the JSON files takes 10-30 s even on a fast machine:
-// airports+airspaces together are ~340 MB.
-// On the first load we build our compact in-memory representation and
-// serialize it next to the source JSON; subsequent loads skip nlohmann
-// entirely and read the binary (~25 MB total) in well under a second.
-//
-// The format is local-machine-only: native endianness, no versioning
-// beyond a magic + schema-version header. Platform portability is not a
-// goal — if the cache is stale we just regenerate it.
+// Parsing the JSON takes tens of seconds, so the first load writes our compact
+// form beside it for later loads to read. The format is local to the machine:
+// native endianness, checked by a magic and a version number only.
 
 namespace {
 
@@ -76,15 +70,14 @@ bool cache_is_fresh(const std::filesystem::path& bin,
     return bin_t >= src_t;
 }
 
-// The records of a JSON array, read one at a time, so a stop is seen between
-// any two. The world's airspace parsed as one document holds over a gigabyte,
-// which takes seconds to free when a stop cuts the parse short.
+// One record at a time, so a stop is seen between any two: the world's airspace
+// as one document holds over a gigabyte, which takes seconds to free.
 class RecordReader
 {
 public:
     explicit RecordReader(std::istream& in) : in_(in)
     {
-        // a UTF-8 byte order mark, which the whole-document parse skipped too
+        // a UTF-8 byte order mark would be read in place of the '['
         if (in_.peek() == 0xEF) in_.ignore(3);
     }
 
@@ -529,8 +522,7 @@ ReferenceData load_reference_data(std::string_view airports_path,
     namespace fs = std::filesystem;
 
     // ── airports: binary cache fast-path, JSON fall-back ──────────────
-    // A parse cut short holds part of the file at most, and saved as the
-    // cache it would pass for the whole until the source changes.
+    // not cached when cut short: it would stand in for the whole file until the JSON changes
     if (!airports_path.empty()) {
         fs::path json_p{airports_path};
         fs::path bin_p = json_p; bin_p.replace_extension(".bin");

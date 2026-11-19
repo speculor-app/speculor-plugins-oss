@@ -115,10 +115,7 @@ endif()
 # ── adsb_display: the parts that survive without a display ───────────
 # Rendering cannot be asserted headlessly, but the waypoints list is what a
 # .speculor file stores and restores — a lossy round-trip loses user data
-# silently. The rest is robustness against inputs the GUI really produces, and
-# a stop or a change of tile server that does not wait out a tile download the
-# server never answers (PLG-4); the runner is the downloads' proxy, so nothing
-# reaches the internet.
+# silently. The rest is robustness against inputs the GUI really produces.
 if(TARGET adsb_display)
     spc_add_plugin_test(spc_adsb_display_tests
         SOURCES adsb_display_runner.cpp

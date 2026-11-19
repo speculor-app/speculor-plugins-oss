@@ -221,8 +221,7 @@ struct DownloadQueue
     std::optional<std::string> next_server;  // set by update_server(), taken by the worker
     std::thread worker;
     std::atomic<bool> running{false};
-    // The fetch in flight carries it: interrupt() sets it, and so does a server
-    // change, which has no use for what the old server sends.
+    // carried by the fetch in flight; set by interrupt() and by a server change
     std::atomic<bool> cancel{false};
     std::mutex wake_mutex;
     std::condition_variable wake;
@@ -266,10 +265,8 @@ struct DownloadQueue
         pending.push_back({key});
     }
 
-    // Returns at once: the worker switches before its next fetch, the fetch in
-    // flight is cancelled, and nothing the old server sent reaches the cache.
-    // The cancel goes first, so the worker's reset once it has switched can
-    // never come before it and leave every later fetch cancelled.
+    // Returns at once. The cancel goes first: stored after next_server, it could
+    // land after the worker's reset and cancel every fetch from then on.
     void update_server(const char* server)
     {
         cancel.store(true);
@@ -309,9 +306,8 @@ private:
             if (server) {
                 downloader.cleanup();
                 downloader.init(server->c_str());
-                // Read after the reset: interrupt() clears running before it
-                // sets cancel, so either this sees the stop or the stop's
-                // cancel lands after the reset.
+                // read after the reset: interrupt() clears running before it sets
+                // cancel, so either this sees the stop or its cancel comes after
                 cancel.store(false);
                 if (!running.load()) break;
             }
