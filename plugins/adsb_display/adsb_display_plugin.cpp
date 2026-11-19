@@ -541,6 +541,13 @@ static int start(SpcPluginInstance* inst)
     return 0;
 }
 
+static void request_stop(SpcPluginInstance* inst)
+{
+    auto* s = state(inst);
+    s->download_queue.interrupt();
+    s->photo_queue.interrupt();
+}
+
 static int stop(SpcPluginInstance* inst)
 {
     auto* s = state(inst);
@@ -1310,4 +1317,5 @@ SPC_EXPORT_PLUGIN(
     .start             = start,
     .stop              = stop,
     .set_host_services = set_host_services,
-    .ui_input          = ui_input)
+    .ui_input          = ui_input,
+    .interrupt         = request_stop)
