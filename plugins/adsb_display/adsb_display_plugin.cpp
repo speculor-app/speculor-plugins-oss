@@ -501,21 +501,15 @@ static int start(SpcPluginInstance* inst)
     // clear any pending param reconfiguration — start applied current params
     s->params_dirty.store(false, std::memory_order_release);
 
-    // One-shot load of reference data (airports + airspace). CMake copies
-    // Reference data (airports + airspace) is loaded asynchronously on a
-    // background thread — even from the binary cache it's tens of MB, and a
-    // fresh first-run JSON parse is 10-30 s. Doing this on start() would
-    // freeze the engine. The airports/airspace layers and related tooltip
-    // code all gate on `reference_loaded.load(acquire)` before touching the
-    // data, so rendering is safe while the thread is still working.
+    // Loaded on a thread: a first-run parse takes tens of seconds, which start()
+    // must not hold the engine for. Readers gate on `reference_loaded` (acquire).
     if (!s->reference_loaded.load(std::memory_order_acquire)
         && !s->loader_thread.joinable()) {
         auto data_dir = spc::plugin_data::own_module_dir() / "data" / "openaip";
         auto airports_path = (data_dir / "airports.json").string();
         auto airspace_path = (data_dir / "airspace.json").string();
 
-        // interrupt and stop ask it to end early: destroy_instance joins it,
-        // and would wait out a first-run parse
+        // destroy_instance joins it, so interrupt and stop ask it to end early
         s->loader_thread = std::jthread([s, airports_path, airspace_path](std::stop_token stop) {
             auto t0 = std::chrono::steady_clock::now();
             s->reference = load_reference_data(airports_path, airspace_path, stop);

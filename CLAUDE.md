@@ -21,7 +21,7 @@ Speculor — and everything under it (`speculor-app`, `speculor-sdk`, `speculor-
   third-party-derived or copyleft-linked addition needs a `plugins/<name>/LICENSE`
   and a `THIRD_PARTY_NOTICES.md` entry. Putting code in a public repo does **not**
   by itself make bundling copyleft (e.g. GPL) code safe — that needs separate review.
-  - **Comments**: Add a comment only when it explains something the code itself cannot show — a non-obvious *why*, an invariant, or a gotcha. Don't restate what the code already says, and never narrate changes, fixes, or history in comments — that belongs in the git commit message.
+  - **Comments**: none by default. Write one only where a reader would otherwise get the code wrong: an invariant the code relies on, a lock or ordering rule, a library or platform quirk, a *why* the code cannot show. One line where possible. Never restate the code, say what a function obviously does, narrate changes or history, or cite bugs, reviews or tests in a comment — that belongs in the commit message (requirement tags such as `// covers REL-4` stay). The SDK's public headers keep terse API docs: what a call promises, who owns what, which thread, how long a pointer lives. Code you change sheds the comments around it that fail this rule.
   - **Don't add co-authored to commits, merge and PRs description.** Keep comments and PRs description clean of co-authored messages.
 
 ## What this repo is

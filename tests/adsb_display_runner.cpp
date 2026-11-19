@@ -9,16 +9,9 @@
 //
 // The rest is robustness: the plugin is interactive and non-blocking on every
 // input, so it must tolerate being processed with nothing connected and being
-// handed input events at times the GUI can genuinely produce them. And it must
-// stop while a tile download hangs (PLG-4): its stop() joins the downloader,
-// which a download left to run would hold for its 10 s timeout. A change of
-// tile server, made from process(), must neither wait that download out nor
-// let it finish. Every https://
-// request here goes to a proxy that never answers, so the run never reaches
-// the internet.
+// handed input events at times the GUI can genuinely produce them.
 
-// The sockets lead: windows.h, which the harness pulls, would otherwise bring
-// winsock.h first.
+// before the harness, whose windows.h would otherwise bring in winsock.h first
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -64,8 +57,8 @@ void check(bool cond, const std::string& what) {
     if (!cond) ++failures;
 }
 
-// Listens on loopback and never accepts on its own: the kernel completes the
-// handshake from the backlog, the request goes out, and no reply ever comes.
+// Never accepts on its own: the kernel completes the handshake from the backlog,
+// so a request goes out and no reply ever comes.
 class SilentServer {
 public:
     bool start() {
@@ -87,8 +80,7 @@ public:
     }
     ~SilentServer() { if (sock_ != kBadSocket) close_socket(sock_); }
 
-    // HTTPS requests made by this process go through us as their proxy:
-    // libcurl takes its proxy from the environment.
+    // libcurl takes its proxy from the environment, so this catches every https:// request
     void proxy_https() const {
         const std::string proxy = "http://127.0.0.1:" + std::to_string(port_);
 #ifdef _WIN32
@@ -102,12 +94,10 @@ public:
 #endif
     }
 
-    // Whether a client connects within `ms`. Its connection waits in the
-    // backlog until request_ended_within() takes it.
+    // the connection stays in the backlog until request_ended_within() takes it
     bool connected_within(int ms) const { return readable(sock_, ms); }
 
-    // Whether the client that connected gives up its request within `ms`,
-    // closing the connection as libcurl does when a request is aborted.
+    // ended: the client closed the connection, as libcurl does on an aborted request
     bool request_ended_within(int ms) {
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
         if (!connected_within(ms)) return false;
@@ -284,8 +274,7 @@ int main(int argc, char** argv) {
     // --- process with nothing connected -------------------------------------
     // Every input is NON_BLOCKING, so the engine will call process() with no
     // data whenever nothing upstream has produced any.
-    // Tiles from a server no run has ever reached, so none is on disk and the
-    // first frame asks for some (Custom is the last map style).
+    // a server no run has cached, so the first frame asks for tiles (Custom is style 5)
     check(set_enum(plugin, "map_style", 5), "map_style Custom");
     check(set_string(plugin, "custom_server", "tiles.invalid"), "custom_server");
     check(plugin.start() == 0, "start()");
@@ -329,6 +318,7 @@ int main(int argc, char** argv) {
     check(server.request_ended_within(2500), "and the old server's download ends");
 
     // --- stop while a tile download hangs -----------------------------------
+    // covers PLG-4
     check(server.connected_within(5000), "the new server's download starts");
     plugin.interrupt();
     check(server.request_ended_within(2500), "interrupt ends the tile download");
