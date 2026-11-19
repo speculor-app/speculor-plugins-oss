@@ -364,7 +364,7 @@ static void param_rules(const SpcValue* values, uint32_t* states)
     r.disable("zoom", auto_view);
     r.disable("radius", auto_view);
 
-    r.disable("custom_server", r.choice("map_style") != 6);
+    r.disable("custom_server", r.choice("map_style") != MAP_STYLE_CUSTOM);
     r.disable("trail_length", !r.on("show_trails"));
     r.disable("trend_seconds", !r.on("show_trend_vector"));
 

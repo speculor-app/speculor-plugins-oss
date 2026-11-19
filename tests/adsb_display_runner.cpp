@@ -264,6 +264,23 @@ int main(int argc, char** argv) {
         std::printf("  (no list parameter — skipping waypoint checks)\n");
     }
 
+    // --- the Custom Server field is editable exactly when the style is Custom
+    {
+        SpcParameterDesc style{};
+        check(plugin.get_parameter("map_style", &style) == 0 && style.enum_val.count == 6
+                  && std::strcmp(style.enum_val.labels[5], "Custom") == 0,
+              "Custom is the last of six map styles");
+        const auto disabled = [&] {
+            SpcParameterDesc dsc{};
+            return plugin.get_parameter("custom_server", &dsc) == 0
+                && (dsc.flags & SPC_PARAM_FLAG_DISABLED) != 0;
+        };
+        check(set_enum(plugin, "map_style", 2) && disabled(),
+              "custom_server is disabled for a built-in style");
+        check(set_enum(plugin, "map_style", 5) && !disabled(),
+              "and editable for Custom, the last style");
+    }
+
     // --- process with nothing connected -------------------------------------
     // Every input is NON_BLOCKING, so the engine will call process() with no
     // data whenever nothing upstream has produced any.
