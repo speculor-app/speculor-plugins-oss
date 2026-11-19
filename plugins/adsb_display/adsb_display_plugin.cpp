@@ -364,7 +364,7 @@ static void param_rules(const SpcValue* values, uint32_t* states)
     r.disable("zoom", auto_view);
     r.disable("radius", auto_view);
 
-    r.disable("custom_server", r.choice("map_style") != 6);
+    r.disable("custom_server", r.choice("map_style") != MAP_STYLE_CUSTOM);
     r.disable("trail_length", !r.on("show_trails"));
     r.disable("trend_seconds", !r.on("show_trend_vector"));
 
@@ -514,9 +514,12 @@ static int start(SpcPluginInstance* inst)
         auto airports_path = (data_dir / "airports.json").string();
         auto airspace_path = (data_dir / "airspace.json").string();
 
-        s->loader_thread = std::jthread([s, airports_path, airspace_path] {
+        // interrupt and stop ask it to end early: destroy_instance joins it,
+        // and would wait out a first-run parse
+        s->loader_thread = std::jthread([s, airports_path, airspace_path](std::stop_token stop) {
             auto t0 = std::chrono::steady_clock::now();
-            s->reference = load_reference_data(airports_path, airspace_path);
+            s->reference = load_reference_data(airports_path, airspace_path, stop);
+            if (stop.stop_requested()) return;
             // Build the ICAO -> airport pointer map before flipping the
             // ready flag so readers never see a half-initialized map.
             s->airport_by_icao.reserve(s->reference.airports.size());
@@ -541,9 +544,18 @@ static int start(SpcPluginInstance* inst)
     return 0;
 }
 
+static void request_stop(SpcPluginInstance* inst)
+{
+    auto* s = state(inst);
+    s->download_queue.interrupt();
+    s->photo_queue.interrupt();
+    s->loader_thread.request_stop();
+}
+
 static int stop(SpcPluginInstance* inst)
 {
     auto* s = state(inst);
+    s->loader_thread.request_stop();
     s->download_queue.stop();
     s->photo_queue.stop();
     s->flag_cache.clear();
@@ -1310,4 +1322,5 @@ SPC_EXPORT_PLUGIN(
     .start             = start,
     .stop              = stop,
     .set_host_services = set_host_services,
-    .ui_input          = ui_input)
+    .ui_input          = ui_input,
+    .interrupt         = request_stop)

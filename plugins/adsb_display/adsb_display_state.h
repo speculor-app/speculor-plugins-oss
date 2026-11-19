@@ -27,6 +27,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <deque>
 #include <filesystem>
 #include <format>
@@ -35,6 +36,7 @@
 #include <memory>
 #include <mutex>
 #include <numbers>
+#include <optional>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -183,7 +185,7 @@ struct TileDownloader
         http.reset();
     }
 
-    cv::Mat fetch(const TileKey& key)
+    cv::Mat fetch(const TileKey& key, const std::atomic<bool>& cancel)
     {
         if (!http) return {};
 
@@ -193,6 +195,7 @@ struct TileDownloader
         spclib::http::RequestOptions opts;
         opts.timeout = std::chrono::seconds{10};
         opts.user_agent = user_agent;
+        opts.cancel = &cancel;
 
         auto resp = http->get(url, opts);
         if (!resp.ok() || resp.body.empty())
@@ -212,27 +215,43 @@ struct DownloadResult { TileKey key; cv::Mat tile; };
 
 struct DownloadQueue
 {
-    std::mutex queue_mutex;       // protects pending + completed
-    std::mutex downloader_mutex;  // protects downloader (fetch can be slow)
+    std::mutex queue_mutex;       // protects pending, completed and next_server
     std::deque<DownloadRequest> pending;
     std::deque<DownloadResult> completed;
+    std::optional<std::string> next_server;  // set by update_server(), taken by the worker
     std::thread worker;
     std::atomic<bool> running{false};
+    // The fetch in flight carries it: interrupt() sets it, and so does a server
+    // change, which has no use for what the old server sends.
+    std::atomic<bool> cancel{false};
+    std::mutex wake_mutex;
+    std::condition_variable wake;
 
-    TileDownloader downloader;
+    TileDownloader downloader;    // the worker's alone while it runs
     SpcLogContext* log_ctx = nullptr;
 
     void start(const char* server, SpcLogContext* log)
     {
         log_ctx = log;
         downloader.init(server);
+        cancel.store(false);
         running.store(true);
         worker = std::thread(&DownloadQueue::thread_fn, this);
     }
 
+    void interrupt()
+    {
+        {
+            std::lock_guard lock(wake_mutex);
+            running.store(false);
+        }
+        cancel.store(true);
+        wake.notify_one();
+    }
+
     void stop()
     {
-        running.store(false);
+        interrupt();
         if (worker.joinable()) worker.join();
         downloader.cleanup();
     }
@@ -247,11 +266,16 @@ struct DownloadQueue
         pending.push_back({key});
     }
 
+    // Returns at once: the worker switches before its next fetch, the fetch in
+    // flight is cancelled, and nothing the old server sent reaches the cache.
+    // The cancel goes first, so the worker's reset once it has switched can
+    // never come before it and leave every later fetch cancelled.
     void update_server(const char* server)
     {
-        std::lock_guard lock(downloader_mutex);
-        downloader.cleanup();
-        downloader.init(server);
+        cancel.store(true);
+        std::lock_guard lock(queue_mutex);
+        next_server = server;
+        completed.clear();
     }
 
     // drain completed downloads into cache (call from process thread only)
@@ -268,11 +292,13 @@ struct DownloadQueue
 private:
     void thread_fn()
     {
-        while (running.load(std::memory_order_relaxed)) {
+        while (running.load()) {
             DownloadRequest req{};
             bool have_req = false;
+            std::optional<std::string> server;
             {
                 std::lock_guard lock(queue_mutex);
+                server.swap(next_server);
                 if (!pending.empty()) {
                     req = pending.front();
                     pending.pop_front();
@@ -280,20 +306,29 @@ private:
                 }
             }
 
+            if (server) {
+                downloader.cleanup();
+                downloader.init(server->c_str());
+                // Read after the reset: interrupt() clears running before it
+                // sets cancel, so either this sees the stop or the stop's
+                // cancel lands after the reset.
+                cancel.store(false);
+                if (!running.load()) break;
+            }
+
             if (!have_req) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                std::unique_lock lock(wake_mutex);
+                wake.wait_for(lock, std::chrono::milliseconds(50),
+                              [this] { return !running.load(); });
                 continue;
             }
 
-            cv::Mat tile;
-            {
-                std::lock_guard lock(downloader_mutex);
-                tile = downloader.fetch(req.key);
-            }
+            cv::Mat tile = downloader.fetch(req.key, cancel);
 
             if (!tile.empty()) {
                 std::lock_guard lock(queue_mutex);
-                completed.push_back({req.key, std::move(tile)});
+                if (!next_server)   // else it came from the server being replaced
+                    completed.push_back({req.key, std::move(tile)});
             }
         }
     }
@@ -774,6 +809,10 @@ struct MapDisplayState
         std::unordered_set<uint32_t> requested;  // all ICAOs ever queued
         std::thread worker;
         std::atomic<bool> running{false};
+        // set by interrupt(): ends the download in flight and the waits around it
+        std::atomic<bool> cancel{false};
+        std::mutex wake_mutex;
+        std::condition_variable wake;
         std::unique_ptr<spclib::http::Client> http;
         SpcLogContext* log = nullptr;
         std::string cache_dir;
@@ -792,12 +831,22 @@ struct MapDisplayState
             std::filesystem::create_directories(cache_dir);
 
             http = std::make_unique<spclib::http::Client>();
+            cancel.store(false);
             running.store(true);
             worker = std::thread(&PhotoDownloadQueue::thread_fn, this);
         }
 
+        void interrupt() {
+            cancel.store(true);
+            {
+                std::lock_guard lock(wake_mutex);
+                running.store(false);
+            }
+            wake.notify_one();
+        }
+
         void stop() {
-            running.store(false);
+            interrupt();
             if (worker.joinable()) worker.join();
             http.reset();
         }
@@ -823,6 +872,11 @@ struct MapDisplayState
         static constexpr int THUMB_W = 80;
         static constexpr int THUMB_H = 60;
 
+        void pause(std::chrono::milliseconds d) {
+            std::unique_lock lock(wake_mutex);
+            wake.wait_for(lock, d, [this] { return !running.load(std::memory_order_relaxed); });
+        }
+
         void thread_fn() {
             while (running.load(std::memory_order_relaxed)) {
                 PhotoRequest req{};
@@ -836,7 +890,7 @@ struct MapDisplayState
                     }
                 }
                 if (!have) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    pause(std::chrono::milliseconds(100));
                     continue;
                 }
 
@@ -860,6 +914,7 @@ struct MapDisplayState
                 spclib::http::RequestOptions opts;
                 opts.timeout = std::chrono::seconds{15};
                 opts.user_agent = "Speculor/1.0";
+                opts.cancel = &cancel;
 
                 auto resp = http->get(req.url, opts);
                 if (!resp.ok()) continue;
@@ -879,10 +934,12 @@ struct MapDisplayState
                 if (img.cols != THUMB_W || img.rows != THUMB_H)
                     cv::resize(img, img, {THUMB_W, THUMB_H}, 0, 0, cv::INTER_AREA);
 
-                std::lock_guard lock(mutex);
-                completed.push_back({req.icao, std::move(img)});
+                {
+                    std::lock_guard lock(mutex);
+                    completed.push_back({req.icao, std::move(img)});
+                }
 
-                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                pause(std::chrono::milliseconds(200));
             }
         }
     };

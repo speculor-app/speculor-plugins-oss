@@ -8,11 +8,12 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <istream>
 #include <string>
 
 // ── binary cache format ──────────────────────────────────────────────
-// Parsing the JSON files takes 10-30 s even on a fast machine because
-// nlohmann builds a full DOM and airports+airspaces together are ~340 MB.
+// Parsing the JSON files takes 10-30 s even on a fast machine:
+// airports+airspaces together are ~340 MB.
 // On the first load we build our compact in-memory representation and
 // serialize it next to the source JSON; subsequent loads skip nlohmann
 // entirely and read the binary (~25 MB total) in well under a second.
@@ -74,6 +75,34 @@ bool cache_is_fresh(const std::filesystem::path& bin,
     auto src_t = std::filesystem::last_write_time(src, ec);  if (ec) return false;
     return bin_t >= src_t;
 }
+
+// The records of a JSON array, read one at a time, so a stop is seen between
+// any two. The world's airspace parsed as one document holds over a gigabyte,
+// which takes seconds to free when a stop cuts the parse short.
+class RecordReader
+{
+public:
+    explicit RecordReader(std::istream& in) : in_(in)
+    {
+        // a UTF-8 byte order mark, which the whole-document parse skipped too
+        if (in_.peek() == 0xEF) in_.ignore(3);
+    }
+
+    // false past the last record, or where the input stops being an array
+    bool next(nlohmann::json& record)
+    {
+        char c = 0;
+        if (!(in_ >> c) || c != (first_ ? '[' : ',')) return false;
+        if (first_ && (in_ >> std::ws).peek() == ']') return false;
+        first_ = false;
+        try { in_ >> record; } catch (...) { return false; }
+        return true;
+    }
+
+private:
+    std::istream& in_;
+    bool first_ = true;
+};
 
 } // namespace
 
@@ -248,17 +277,14 @@ void compute_bbox(AirspaceFeature& a)
 // ── airports.json: JSON array of OpenAIP airport records ─────────
 
 void load_airports(const std::filesystem::path& path,
-                   std::vector<AirportFeature>& out)
+                   std::vector<AirportFeature>& out, const std::stop_token& stop)
 {
     std::ifstream f(path);
     if (!f) return;
 
-    nlohmann::json j;
-    try { f >> j; } catch (...) { return; }
-    if (!j.is_array()) return;
-
-    out.reserve(out.size() + j.size());
-    for (const auto& rec : j) {
+    RecordReader records(f);
+    nlohmann::json rec;
+    while (!stop.stop_requested() && records.next(rec)) {
         int type = rec.value("type", -1);
         if (type == 10) continue;  // closed — skip entirely
 
@@ -298,17 +324,14 @@ void load_airports(const std::filesystem::path& path,
 // ── airspace.json: JSON array of OpenAIP airspace records ────────
 
 void load_airspaces(const std::filesystem::path& path,
-                    std::vector<AirspaceFeature>& out)
+                    std::vector<AirspaceFeature>& out, const std::stop_token& stop)
 {
     std::ifstream f(path);
     if (!f) return;
 
-    nlohmann::json j;
-    try { f >> j; } catch (...) { return; }
-    if (!j.is_array()) return;
-
-    out.reserve(out.size() + j.size());
-    for (const auto& rec : j) {
+    RecordReader records(f);
+    nlohmann::json rec;
+    while (!stop.stop_requested() && records.next(rec)) {
         AirspaceFeature a;
         a.name = rec.value("name", "");
 
@@ -357,7 +380,7 @@ namespace {
 // ── airport cache ────────────────────────────────────────────────────
 
 bool load_airports_bin(const std::filesystem::path& path,
-                       std::vector<AirportFeature>& out)
+                       std::vector<AirportFeature>& out, const std::stop_token& stop)
 {
     std::ifstream f(path, std::ios::binary);
     if (!f) return false;
@@ -371,6 +394,7 @@ bool load_airports_bin(const std::filesystem::path& path,
     out.clear();
     out.reserve(static_cast<size_t>(count));
     for (uint64_t i = 0; i < count; ++i) {
+        if (stop.stop_requested()) return false;
         AirportFeature a;
         if (!read_str(f, a.ident)) return false;
         if (!read_str(f, a.iata)) return false;
@@ -422,7 +446,7 @@ void save_airports_bin(const std::filesystem::path& path,
 // ── airspace cache ───────────────────────────────────────────────────
 
 bool load_airspaces_bin(const std::filesystem::path& path,
-                        std::vector<AirspaceFeature>& out)
+                        std::vector<AirspaceFeature>& out, const std::stop_token& stop)
 {
     std::ifstream f(path, std::ios::binary);
     if (!f) return false;
@@ -436,6 +460,7 @@ bool load_airspaces_bin(const std::filesystem::path& path,
     out.clear();
     out.reserve(static_cast<size_t>(count));
     for (uint64_t i = 0; i < count; ++i) {
+        if (stop.stop_requested()) return false;
         AirspaceFeature a;
         if (!read_str(f, a.name)) return false;
         uint8_t klass;
@@ -497,32 +522,35 @@ void save_airspaces_bin(const std::filesystem::path& path,
 } // namespace
 
 ReferenceData load_reference_data(std::string_view airports_path,
-                                  std::string_view airspace_path)
+                                  std::string_view airspace_path,
+                                  std::stop_token stop)
 {
     ReferenceData out;
     namespace fs = std::filesystem;
 
     // ── airports: binary cache fast-path, JSON fall-back ──────────────
+    // A parse cut short holds part of the file at most, and saved as the
+    // cache it would pass for the whole until the source changes.
     if (!airports_path.empty()) {
         fs::path json_p{airports_path};
         fs::path bin_p = json_p; bin_p.replace_extension(".bin");
-        if (cache_is_fresh(bin_p, json_p) && load_airports_bin(bin_p, out.airports)) {
+        if (cache_is_fresh(bin_p, json_p) && load_airports_bin(bin_p, out.airports, stop)) {
             // loaded from cache — nothing more to do
-        } else if (fs::exists(json_p)) {
-            load_airports(json_p, out.airports);
-            save_airports_bin(bin_p, out.airports);
+        } else if (!stop.stop_requested() && fs::exists(json_p)) {
+            load_airports(json_p, out.airports, stop);
+            if (!stop.stop_requested()) save_airports_bin(bin_p, out.airports);
         }
     }
 
     // ── airspace: same pattern ────────────────────────────────────────
-    if (!airspace_path.empty()) {
+    if (!airspace_path.empty() && !stop.stop_requested()) {
         fs::path json_p{airspace_path};
         fs::path bin_p = json_p; bin_p.replace_extension(".bin");
-        if (cache_is_fresh(bin_p, json_p) && load_airspaces_bin(bin_p, out.airspaces)) {
+        if (cache_is_fresh(bin_p, json_p) && load_airspaces_bin(bin_p, out.airspaces, stop)) {
             // loaded from cache
-        } else if (fs::exists(json_p)) {
-            load_airspaces(json_p, out.airspaces);
-            save_airspaces_bin(bin_p, out.airspaces);
+        } else if (!stop.stop_requested() && fs::exists(json_p)) {
+            load_airspaces(json_p, out.airspaces, stop);
+            if (!stop.stop_requested()) save_airspaces_bin(bin_p, out.airspaces);
         }
     }
 

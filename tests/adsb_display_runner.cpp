@@ -9,14 +9,48 @@
 //
 // The rest is robustness: the plugin is interactive and non-blocking on every
 // input, so it must tolerate being processed with nothing connected and being
-// handed input events at times the GUI can genuinely produce them.
+// handed input events at times the GUI can genuinely produce them. And it must
+// stop while a tile download hangs (PLG-4): its stop() joins the downloader,
+// which a download left to run would hold for its 10 s timeout. A change of
+// tile server, made from process(), must neither wait that download out nor
+// let it finish. Every https://
+// request here goes to a proxy that never answers, so the run never reaches
+// the internet.
+
+// The sockets lead: windows.h, which the harness pulls, would otherwise bring
+// winsock.h first.
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#pragma comment(lib, "ws2_32.lib")
+using socket_t = SOCKET;
+constexpr socket_t kBadSocket = INVALID_SOCKET;
+inline void close_socket(socket_t s) { ::closesocket(s); }
+#else
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <unistd.h>
+using socket_t = int;
+constexpr socket_t kBadSocket = -1;
+inline void close_socket(socket_t s) { ::close(s); }
+#endif
 
 #include <testing/conformance.h>
 #include <testing/fake_host.h>
 #include <testing/plugin_under_test.h>
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -28,6 +62,98 @@ int failures = 0;
 void check(bool cond, const std::string& what) {
     std::printf("  %-58s %s\n", what.c_str(), cond ? "ok" : "FAIL");
     if (!cond) ++failures;
+}
+
+// Listens on loopback and never accepts on its own: the kernel completes the
+// handshake from the backlog, the request goes out, and no reply ever comes.
+class SilentServer {
+public:
+    bool start() {
+#ifdef _WIN32
+        WSADATA wsa;
+        WSAStartup(MAKEWORD(2, 2), &wsa);
+#endif
+        sock_ = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (sock_ == kBadSocket) return false;
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        if (::bind(sock_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) return false;
+        if (::listen(sock_, 8) != 0) return false;
+        socklen_t len = sizeof(addr);
+        if (::getsockname(sock_, reinterpret_cast<sockaddr*>(&addr), &len) != 0) return false;
+        port_ = ntohs(addr.sin_port);
+        return true;
+    }
+    ~SilentServer() { if (sock_ != kBadSocket) close_socket(sock_); }
+
+    // HTTPS requests made by this process go through us as their proxy:
+    // libcurl takes its proxy from the environment.
+    void proxy_https() const {
+        const std::string proxy = "http://127.0.0.1:" + std::to_string(port_);
+#ifdef _WIN32
+        // libcurl reads the process environment block, not the CRT's copy
+        SetEnvironmentVariableA("https_proxy", proxy.c_str());
+        SetEnvironmentVariableA("no_proxy", nullptr);
+#else
+        setenv("https_proxy", proxy.c_str(), 1);
+        unsetenv("no_proxy");
+        unsetenv("NO_PROXY");
+#endif
+    }
+
+    // Whether a client connects within `ms`. Its connection waits in the
+    // backlog until request_ended_within() takes it.
+    bool connected_within(int ms) const { return readable(sock_, ms); }
+
+    // Whether the client that connected gives up its request within `ms`,
+    // closing the connection as libcurl does when a request is aborted.
+    bool request_ended_within(int ms) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
+        if (!connected_within(ms)) return false;
+        const socket_t c = ::accept(sock_, nullptr, nullptr);
+        if (c == kBadSocket) return false;
+        bool ended = false;
+        constexpr int kBufSize = 512;
+        char buf[kBufSize];
+        while (!ended) {
+            const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now()).count();
+            if (left <= 0 || !readable(c, static_cast<int>(left))) break;
+            // the request arrives first; then the end of the stream, or a reset
+            ended = ::recv(c, buf, kBufSize, 0) <= 0;
+        }
+        close_socket(c);
+        return ended;
+    }
+
+private:
+    static bool readable(socket_t s, int ms) {
+        fd_set fds;
+        FD_ZERO(&fds);
+        FD_SET(s, &fds);
+        timeval tv;
+        tv.tv_sec = ms / 1000;
+        tv.tv_usec = (ms % 1000) * 1000;
+        return ::select(static_cast<int>(s + 1), &fds, nullptr, nullptr, &tv) == 1;
+    }
+
+    socket_t sock_ = kBadSocket;
+    int port_ = 0;
+};
+
+bool set_enum(spc::testing::PluginUnderTest& p, const char* name, int32_t v) {
+    SpcParameterDesc d{};
+    if (p.get_parameter(name, &d) != 0 || d.type != SPC_PARAM_ENUM) return false;
+    d.enum_val.value = v;
+    return p.set_parameter(name, &d) == 0;
+}
+
+bool set_string(spc::testing::PluginUnderTest& p, const char* name, const char* v) {
+    SpcParameterDesc d{};
+    if (p.get_parameter(name, &d) != 0 || d.type != SPC_PARAM_STRING) return false;
+    std::snprintf(d.string_val.value, sizeof(d.string_val.value), "%s", v);
+    return p.set_parameter(name, &d) == 0;
 }
 
 bool approx_eq(double a, double b, double eps = 1e-9) { return std::fabs(a - b) < eps; }
@@ -58,6 +184,13 @@ int main(int argc, char** argv) {
     }
     const auto* d = plugin.descriptor();
     std::printf("plugin: %s\n", d && d->id[0] ? d->id : "<no id>");
+
+    SilentServer server;
+    if (!server.start()) {
+        std::fprintf(stderr, "FAIL: could not open the silent server\n");
+        return 1;
+    }
+    server.proxy_https();
 
     const SpcPlugin* vt = plugin.vtable();
     spc::testing::FakeHost host;
@@ -131,9 +264,30 @@ int main(int argc, char** argv) {
         std::printf("  (no list parameter — skipping waypoint checks)\n");
     }
 
+    // --- the Custom Server field is editable exactly when the style is Custom
+    {
+        SpcParameterDesc style{};
+        check(plugin.get_parameter("map_style", &style) == 0 && style.enum_val.count == 6
+                  && std::strcmp(style.enum_val.labels[5], "Custom") == 0,
+              "Custom is the last of six map styles");
+        const auto disabled = [&] {
+            SpcParameterDesc dsc{};
+            return plugin.get_parameter("custom_server", &dsc) == 0
+                && (dsc.flags & SPC_PARAM_FLAG_DISABLED) != 0;
+        };
+        check(set_enum(plugin, "map_style", 2) && disabled(),
+              "custom_server is disabled for a built-in style");
+        check(set_enum(plugin, "map_style", 5) && !disabled(),
+              "and editable for Custom, the last style");
+    }
+
     // --- process with nothing connected -------------------------------------
     // Every input is NON_BLOCKING, so the engine will call process() with no
     // data whenever nothing upstream has produced any.
+    // Tiles from a server no run has ever reached, so none is on disk and the
+    // first frame asks for some (Custom is the last map style).
+    check(set_enum(plugin, "map_style", 5), "map_style Custom");
+    check(set_string(plugin, "custom_server", "tiles.invalid"), "custom_server");
     check(plugin.start() == 0, "start()");
     SpcData outputs[1]{};
     outputs[0].type = SPC_DATA_FRAME;
@@ -161,6 +315,23 @@ int main(int argc, char** argv) {
         check(true, "ui_input tolerates a zeroed event");
     }
 
+    // --- a change of tile server while a download hangs ---------------------
+    check(server.connected_within(5000), "a tile download reaches the server");
+    check(set_string(plugin, "custom_server", "tiles2.invalid"), "the tile server changes");
+    const auto switching = std::chrono::steady_clock::now();
+    SpcData next[1]{};
+    next[0].type = SPC_DATA_FRAME;
+    plugin.process(nullptr, 0, next, 1);
+    const auto took = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - switching).count();
+    check(took < 1000, "the step that switches servers returns at once ("
+                           + std::to_string(took) + " ms)");
+    check(server.request_ended_within(2500), "and the old server's download ends");
+
+    // --- stop while a tile download hangs -----------------------------------
+    check(server.connected_within(5000), "the new server's download starts");
+    plugin.interrupt();
+    check(server.request_ended_within(2500), "interrupt ends the tile download");
     check(plugin.stop() == 0, "stop()");
 
     plugin.destroy();
