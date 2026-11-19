@@ -9,6 +9,7 @@
 // malformed so the plugin still runs without them.
 
 #include <cstdint>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -77,6 +78,9 @@ struct ReferenceData {
 };
 
 // Parse whichever files are present. Empty-string paths or missing files
-// are fine — the returned vectors will just be empty.
+// are fine — the returned vectors will just be empty. A first parse takes
+// 10-30 s, so it ends early once `stop` is requested, with whatever it has,
+// and a load cut short writes no cache.
 ReferenceData load_reference_data(std::string_view airports_csv_path,
-                                  std::string_view airspace_geojson_path);
+                                  std::string_view airspace_geojson_path,
+                                  std::stop_token stop = {});

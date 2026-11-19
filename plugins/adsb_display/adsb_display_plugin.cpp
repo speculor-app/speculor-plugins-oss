@@ -514,9 +514,12 @@ static int start(SpcPluginInstance* inst)
         auto airports_path = (data_dir / "airports.json").string();
         auto airspace_path = (data_dir / "airspace.json").string();
 
-        s->loader_thread = std::jthread([s, airports_path, airspace_path] {
+        // interrupt and stop ask it to end early: destroy_instance joins it,
+        // and would wait out a first-run parse
+        s->loader_thread = std::jthread([s, airports_path, airspace_path](std::stop_token stop) {
             auto t0 = std::chrono::steady_clock::now();
-            s->reference = load_reference_data(airports_path, airspace_path);
+            s->reference = load_reference_data(airports_path, airspace_path, stop);
+            if (stop.stop_requested()) return;
             // Build the ICAO -> airport pointer map before flipping the
             // ready flag so readers never see a half-initialized map.
             s->airport_by_icao.reserve(s->reference.airports.size());
@@ -546,11 +549,13 @@ static void request_stop(SpcPluginInstance* inst)
     auto* s = state(inst);
     s->download_queue.interrupt();
     s->photo_queue.interrupt();
+    s->loader_thread.request_stop();
 }
 
 static int stop(SpcPluginInstance* inst)
 {
     auto* s = state(inst);
+    s->loader_thread.request_stop();
     s->download_queue.stop();
     s->photo_queue.stop();
     s->flag_cache.clear();
