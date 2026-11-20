@@ -239,7 +239,7 @@ static void scan_devices(SpcHost* svc)
     }
 }
 
-static const SpcNodeInfo* get_descriptor()
+static const SpcNodeInfo* info()
 {
     if (!g_desc_initialized) {
         spc::DescriptorBuilder("nesdr", "NooElec NESDR", "Signal/SDR/Sources")
@@ -465,7 +465,7 @@ static void apply_center_freq(NesdrState* s)
 // the board powers by itself reads as on.
 static void show_profile(NesdrState* s)
 {
-    const SpcNodeInfo* d = get_descriptor();
+    const SpcNodeInfo* d = info();
     const ModelCaps* p = active_profile(s);
     const bool e4000 = p && p->tuner == Tuner::E4000;
 
@@ -555,7 +555,7 @@ static int set_parameter(SpcPluginInstance* inst, const char* name,
     // value still in force. A set that asks for that same value is no request
     // and is passed over in silence: every parameter arrives once, with its
     // default, before the first start().
-    const uint32_t param = spc::param_index(get_descriptor(), name);
+    const uint32_t param = spc::param_index(info(), name);
     if (std::strcmp(name, SPC_SDR_DIRECT_SAMPLING) == 0) {
         const ModelCaps* p = active_profile(s);
         if (!p || !p->direct_sampling) {
@@ -658,7 +658,7 @@ static int set_parameter(SpcPluginInstance* inst, const char* name,
 
 static void param_rules(const SpcValue* values, uint32_t* states)
 {
-    spc::ParamRules r(get_descriptor(), values, states);
+    spc::ParamRules r(info(), values, states);
     // the first option is "None": the user must scan and pick a real device
     const bool no_dev = r.choice("device") <= 0;
     r.missing("device", no_dev);
@@ -674,7 +674,7 @@ static int list_options(uint32_t param, const SpcValue*, int refresh,
                         SpcHost* host_services,
                         SpcOptionSinkFn sink, void* sink_ctx)
 {
-    if (param != spc::param_index(get_descriptor(), "device")) return SPC_NOT_FOUND;
+    if (param != spc::param_index(info(), "device")) return SPC_NOT_FOUND;
     if (refresh) scan_devices(host_services);
     for (int i = 0; i < g_registry.count; ++i)
         sink(sink_ctx, g_registry.ids[i], g_registry.devices[i].label);
@@ -873,11 +873,11 @@ static int process(SpcPluginInstance* inst, SpcStep* step)
 
 // ── export ──────────────────────────────────────────────────────────
 
-SPC_EXPORT_PLUGIN(
-    .info               = get_descriptor,
+SPC_EXPORT_PLUGIN_SLOTS(
+    .info               = info,
     .create_instance    = create_instance,
     .destroy_instance   = destroy_instance,
-    .params_changed    = spc::params_by_name<get_descriptor, set_parameter>,
+    .params_changed    = spc::params_by_name<info, set_parameter>,
     .param_rules        = param_rules,
     .list_options       = list_options,
     .process            = process,

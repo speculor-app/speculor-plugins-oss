@@ -570,11 +570,11 @@ static int record_gpu(SpcPluginInstance* inst, SpcStep* step, SpcGpuPass* pass)
 #endif
 
 #ifdef SPC_HAS_VULKAN
-SPC_EXPORT_PLUGIN(
-    .info              = get_descriptor,
+SPC_EXPORT_PLUGIN_SLOTS(
+    .info              = info,
     .create_instance   = create_instance,
     .destroy_instance  = destroy_instance,
-    .params_changed    = spc::params_by_name<get_descriptor, set_parameter>,
+    .params_changed    = spc::params_by_name<info, set_parameter>,
     .process           = process,
     .start             = start,
     .stop              = stop,
@@ -582,11 +582,11 @@ SPC_EXPORT_PLUGIN(
     .record_gpu        = record_gpu
 )
 #else
-SPC_EXPORT_PLUGIN(
-    .info              = get_descriptor,
+SPC_EXPORT_PLUGIN_SLOTS(
+    .info              = info,
     .create_instance   = create_instance,
     .destroy_instance  = destroy_instance,
-    .params_changed    = spc::params_by_name<get_descriptor, set_parameter>,
+    .params_changed    = spc::params_by_name<info, set_parameter>,
     .process           = process,
     .start             = start,
     .stop              = stop,
