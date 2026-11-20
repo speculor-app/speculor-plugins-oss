@@ -238,10 +238,10 @@ static void destroy_instance(SpcPluginInstance* inst)
 // the other: give the host what the view has become, so it is shown and saved.
 static void push_view(MapDisplayState* s)
 {
-    static const uint32_t k_lat = spc::param_index(get_descriptor(), "center_lat");
-    static const uint32_t k_lon = spc::param_index(get_descriptor(), "center_lon");
-    static const uint32_t k_zoom = spc::param_index(get_descriptor(), "zoom");
-    static const uint32_t k_radius = spc::param_index(get_descriptor(), "radius");
+    static const uint32_t k_lat = spc::param_index(info(), "center_lat");
+    static const uint32_t k_lon = spc::param_index(info(), "center_lon");
+    static const uint32_t k_zoom = spc::param_index(info(), "zoom");
+    static const uint32_t k_radius = spc::param_index(info(), "radius");
 
     const double lat = s->center_lat.load(std::memory_order_relaxed);
     const double lon = s->center_lon.load(std::memory_order_relaxed);
@@ -356,7 +356,7 @@ static int set_parameter(SpcPluginInstance* inst, const char* name,
 
 static void param_rules(const SpcValue* values, uint32_t* states)
 {
-    spc::ParamRules r(get_descriptor(), values, states);
+    spc::ParamRules r(info(), values, states);
 
     const bool auto_view = r.choice("view_mode") == 0;
     r.disable("center_lat", auto_view);
@@ -397,7 +397,7 @@ static void param_rules(const SpcValue* values, uint32_t* states)
 
 void push_waypoints(MapDisplayState* s)
 {
-    const SpcNodeInfo* desc = get_descriptor();
+    const SpcNodeInfo* desc = info();
     const uint32_t param = spc::param_index(desc, "waypoints");
     std::vector<SpcListRow> rows;
     {
@@ -446,10 +446,10 @@ SPC_PLUGIN_LIST_HANDLER(MapDisplayState, set_list_rows_impl)
 // arrived in the same call.
 static void params_changed(SpcPluginInstance* inst, const SpcValue* values, uint64_t changed)
 {
-    static const uint32_t k_zoom = spc::param_index(get_descriptor(), "zoom");
-    static const uint32_t k_radius = spc::param_index(get_descriptor(), "radius");
+    static const uint32_t k_zoom = spc::param_index(info(), "zoom");
+    static const uint32_t k_radius = spc::param_index(info(), "radius");
 
-    spc::params_by_name<get_descriptor, set_parameter, set_list_rows>(inst, values, changed);
+    spc::params_by_name<info, set_parameter, set_list_rows>(inst, values, changed);
 
     const uint64_t both = (uint64_t{1} << k_zoom) | (uint64_t{1} << k_radius);
     if ((changed & both) != both) return;
@@ -1306,8 +1306,8 @@ static int process(SpcPluginInstance* inst, SpcStep* step)
     return 0;
 }
 
-SPC_EXPORT_PLUGIN(
-    .info              = get_descriptor,
+SPC_EXPORT_PLUGIN_SLOTS(
+    .info              = info,
     .create_instance   = create_instance,
     .destroy_instance  = destroy_instance,
     .params_changed    = params_changed,

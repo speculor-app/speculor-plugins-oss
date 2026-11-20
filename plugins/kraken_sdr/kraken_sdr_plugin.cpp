@@ -179,7 +179,7 @@ static void scan_devices(SpcHost* svc)
                            "(need 5 RTL-SDR dongles with serials 1000-1004)");
 }
 
-static const SpcNodeInfo* get_descriptor()
+static const SpcNodeInfo* info()
 {
     if (!g_desc_initialized) {
         spc::DescriptorBuilder("kraken_sdr", "KrakenSDR", "Signal/SDR/Passive Radar/Sources")
@@ -499,7 +499,7 @@ static int set_parameter(SpcPluginInstance* inst, const char* name,
 
 static void param_rules(const SpcValue* values, uint32_t* states)
 {
-    spc::ParamRules r(get_descriptor(), values, states);
+    spc::ParamRules r(info(), values, states);
     // what the scan at load found: the same for every node, and it does not
     // change while the process lives
     const bool no_dev = !g_registry.present;
@@ -1002,11 +1002,11 @@ static int process(SpcPluginInstance* inst, SpcStep* step)
 
 // ── export ──────────────────────────────────────────────────────────
 
-SPC_EXPORT_PLUGIN(
-    .info              = get_descriptor,
+SPC_EXPORT_PLUGIN_SLOTS(
+    .info              = info,
     .create_instance   = create_instance,
     .destroy_instance  = destroy_instance,
-    .params_changed    = spc::params_by_name<get_descriptor, set_parameter>,
+    .params_changed    = spc::params_by_name<info, set_parameter>,
     .param_rules       = param_rules,
     .process           = process,
     .start             = start,

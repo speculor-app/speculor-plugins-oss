@@ -79,7 +79,7 @@ SPC_PLUGIN_DESCRIPTOR(
         .input("mask_in", "Detect Mask", SPC_DATA_FRAME, 4, SPC_CONSUME_NON_BLOCKING)
         .output("mask_out", "FG Mask", SPC_DATA_FRAME)
         .output("image_out", "Image", SPC_DATA_FRAME)
-        .gpu_compute()
+        SPC_IF_VULKAN(.gpu_compute())
         .int_param("threshold", "Threshold", 1, 255, 27, 1, "ViBe")
             .param_help("Pixel intensity difference to classify as foreground")
         .int_param("bg_samples", "BG Samples", 2, 64, 16, 2, "ViBe")
@@ -597,11 +597,11 @@ static int record_gpu(SpcPluginInstance* inst, SpcStep* step, SpcGpuPass* pass)
 #endif
 
 #ifdef SPC_HAS_VULKAN
-SPC_EXPORT_PLUGIN(
-    .info              = get_descriptor,
+SPC_EXPORT_PLUGIN_SLOTS(
+    .info              = info,
     .create_instance   = create_instance,
     .destroy_instance  = destroy_instance,
-    .params_changed    = spc::params_by_name<get_descriptor, set_parameter>,
+    .params_changed    = spc::params_by_name<info, set_parameter>,
     .process           = process,
     .start             = start,
     .stop              = stop,
@@ -609,11 +609,11 @@ SPC_EXPORT_PLUGIN(
     .record_gpu        = record_gpu
 )
 #else
-SPC_EXPORT_PLUGIN(
-    .info              = get_descriptor,
+SPC_EXPORT_PLUGIN_SLOTS(
+    .info              = info,
     .create_instance   = create_instance,
     .destroy_instance  = destroy_instance,
-    .params_changed    = spc::params_by_name<get_descriptor, set_parameter>,
+    .params_changed    = spc::params_by_name<info, set_parameter>,
     .process           = process,
     .start             = start,
     .stop              = stop,
