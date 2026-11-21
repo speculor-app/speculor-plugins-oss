@@ -339,7 +339,7 @@ namespace spclib::bgs
                      out_pix_offset += sizeof(float) * bg_samples[0]->size.num_channels)
                 {
                     const uint8_t *const pix_data{&bg_samples[n]->data[in_pix_offset]};
-                    float *const out_data{(float *)(avg_bg_img.data + out_pix_offset)};
+                    float *const out_data{reinterpret_cast<float *>(avg_bg_img.data + out_pix_offset)};
                     for (int c{0}; c < m_orig_img_size->num_channels; ++c)
                     {
                         const float v{(bpc == 2)
