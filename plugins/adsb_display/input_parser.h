@@ -17,8 +17,7 @@ void resolve_offsets(MapDisplayState* s, const SpcTable* tbl);
 
 // Read GPS position from the third input table (port 2). Returns true if
 // valid data was found and gps_lat/gps_lon are populated.
-bool read_gps_position(MapDisplayState* s, const SpcData* inputs,
-                       uint32_t input_count,
+bool read_gps_position(const SpcData* inputs, uint32_t input_count,
                        double& gps_lat, double& gps_lon);
 
 // Parse the second input port (RECORD, port 1) into s->enrichment_cache.

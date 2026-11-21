@@ -786,7 +786,7 @@ static int process(SpcPluginInstance* inst, SpcStep* step)
     }
 
     double gps_lat = 0.0, gps_lon = 0.0;
-    if (read_gps_position(s, inputs, input_count, gps_lat, gps_lon)) {
+    if (read_gps_position(inputs, input_count, gps_lat, gps_lon)) {
         s->cached_gps_lat = gps_lat;
         s->cached_gps_lon = gps_lon;
         s->has_cached_gps = true;
