@@ -5,6 +5,10 @@
 # list is filtered by if(TARGET) instead of being hardcoded — a held-back plugin
 # should drop out of the test list, not fail the configure.
 
+if(MSVC)
+    add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
+endif()
+
 set(_candidates
     vibe_bgs
     subsense_bgs

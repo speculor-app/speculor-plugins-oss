@@ -65,8 +65,7 @@ void resolve_offsets(MapDisplayState* s, const SpcTable* tbl)
     s->off_dest_icao    = off[IN_DEST_ICAO];
 }
 
-bool read_gps_position(MapDisplayState* s, const SpcData* inputs,
-                       uint32_t input_count,
+bool read_gps_position(const SpcData* inputs, uint32_t input_count,
                        double& gps_lat, double& gps_lon)
 {
     if (input_count < 3 || inputs[2].type != SPC_DATA_TABLE || !inputs[2].table)

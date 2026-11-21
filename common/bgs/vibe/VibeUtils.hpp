@@ -32,9 +32,9 @@ namespace spclib::bgs
     static inline auto l2_dist3_squared(const T *const a, const T *const b)
     {
         using DiffType = std::conditional_t<sizeof(T) == 1, int32_t, int64_t>;
-        const DiffType r0{(DiffType)a[0] - (DiffType)b[0]};
-        const DiffType r1{(DiffType)a[1] - (DiffType)b[1]};
-        const DiffType r2{(DiffType)a[2] - (DiffType)b[2]};
+        const DiffType r0{static_cast<DiffType>(a[0]) - static_cast<DiffType>(b[0])};
+        const DiffType r1{static_cast<DiffType>(a[1]) - static_cast<DiffType>(b[1])};
+        const DiffType r2{static_cast<DiffType>(a[2]) - static_cast<DiffType>(b[2])};
         return (r0 * r0) + (r1 * r1) + (r2 * r2);
     }
 
