@@ -1,13 +1,10 @@
 #include "aircraft_layer.h"
 #include "adsb_display_state.h"
 #include "aircraft_shapes.h"
+#include "draw_helpers.h"
 #include "geo_helpers.h"
 #include "color_palette.h"
 #include "unit_format.h"
-
-#include <opencv2/imgproc.hpp>
-
-#include <spc_ui_text.h>
 
 #include <algorithm>
 #include <cmath>
@@ -17,7 +14,9 @@
 #include <unordered_set>
 #include <vector>
 
-void render_aircraft_layer(MapDisplayState* s,
+using namespace adsb_draw;
+
+void render_aircraft_layer(MapDisplayState* s, DrawList& list,
                            const std::vector<AircraftView>& aircraft,
                            double zoom, double origin_tx, double origin_ty,
                            int w, int h)
@@ -30,21 +29,15 @@ void render_aircraft_layer(MapDisplayState* s,
 
     // draw altitude-colored fading trails (only for aircraft that passed the
     // filter — trail history keeps every observed track, but a filtered-out
-    // plane shouldn't leave a phantom trail behind on the map).
-    //
-    // Render each trail as N_BUCKETS cv::polylines calls instead of one
-    // cv::line per segment: the fade is monotonic with index so consecutive
-    // segments fall into contiguous buckets, and 8 brightness levels across
-    // a 30-point trail is below perceptual JND. Saves ~75% of the dispatch
-    // overhead vs the old per-segment loop while keeping cv::LINE_AA on for
-    // visual quality.
+    // plane shouldn't leave a phantom trail behind on the map). The fade is
+    // monotonic with index, so 8 brightness levels across a trail suffice.
     std::unordered_set<uint32_t> visible_icaos;
     if (s->cur.show_trails) {
         visible_icaos.reserve(aircraft.size());
         for (const auto& ac : aircraft) visible_icaos.insert(ac.icao);
 
         constexpr int N_BUCKETS = 8;
-        std::vector<cv::Point> trail_pts;
+        std::vector<Point> trail_pts;
         trail_pts.reserve(s->trail_history.max_length);
 
         for (const auto& [icao, trail] : s->trail_history.trails) {
@@ -52,12 +45,10 @@ void render_aircraft_layer(MapDisplayState* s,
             if (trail.size() < 2) continue;
             int n = static_cast<int>(trail.size());
 
-            // project all trail points to pixels once per aircraft
             trail_pts.clear();
             for (const auto& pt : trail) {
-                auto px = geo_to_pixel(pt.lat, pt.lon, zoom, origin_tx, origin_ty);
-                trail_pts.emplace_back(static_cast<int>(px.x),
-                                       static_cast<int>(px.y));
+                auto p = geo_to_pixel(pt.lat, pt.lon, zoom, origin_tx, origin_ty);
+                trail_pts.push_back(px(static_cast<int>(p.x), static_cast<int>(p.y)));
             }
 
             int n_segments = n - 1;
@@ -70,15 +61,8 @@ void render_aircraft_layer(MapDisplayState* s,
                 int rep = std::min(n - 1, (seg_start + seg_end) / 2 + 1);
                 double fade = static_cast<double>(rep) / n;
                 auto col = altitude_color(trail[rep].alt);
-                cv::Scalar faded(col[0] * fade, col[1] * fade, col[2] * fade);
-
-                // polyline through points seg_start..seg_end (inclusive)
-                // covers segments [seg_start, seg_end). C-style overload
-                // takes a slice of the projected-point buffer with no copy.
-                const cv::Point* slice = trail_pts.data() + seg_start;
-                int npts = seg_end - seg_start + 1;
-                cv::polylines(s->canvas, &slice, &npts, 1, false,
-                              faded, 1, cv::LINE_AA);
+                const Color faded = rgb({col[0] * fade, col[1] * fade, col[2] * fade});
+                for (int k = seg_start; k < seg_end; ++k) list.line(trail_pts[k], trail_pts[k + 1], 1, faded);
             }
         }
     }
@@ -89,13 +73,14 @@ void render_aircraft_layer(MapDisplayState* s,
 
     auto outline = map_contrast_color(s->cur.map_style);
     auto halo = map_halo_color(s->cur.map_style);
+    const int32_t font = s->cur.font;
 
     uint32_t selected_icao = s->info_panel_icao.load(std::memory_order_relaxed);
 
     for (const auto& ac : aircraft) {
-        auto px = geo_to_pixel(ac.lat, ac.lon, zoom, origin_tx, origin_ty);
+        auto pos = geo_to_pixel(ac.lat, ac.lon, zoom, origin_tx, origin_ty);
 
-        if (px.x < -20 || px.x > w + 20 || px.y < -20 || px.y > h + 20)
+        if (pos.x < -20 || pos.x > w + 20 || pos.y < -20 || pos.y > h + 20)
             continue;
 
         cv::Scalar color = ac.on_ground ? cv::Scalar(150, 150, 150)
@@ -113,10 +98,11 @@ void render_aircraft_layer(MapDisplayState* s,
                 color[i] = color[i] * fade + halo[i] * (1.0 - fade);
         }
 
+        const int ix = static_cast<int>(pos.x), iy = static_cast<int>(pos.y);
+        const Point centre = px(ix, iy);
+
         // record screen position for hit-testing
-        build_pos.push_back({ac.icao,
-                             static_cast<int>(px.x), static_cast<int>(px.y),
-                             icon_size});
+        build_pos.push_back({ac.icao, ix, iy, icon_size});
 
         // trend vector: short line projecting the aircraft's position forward
         // by `trend_seconds`, same color as the icon. Skip on ground or when
@@ -125,81 +111,65 @@ void render_aircraft_layer(MapDisplayState* s,
             double dist_km = ac.gs * 1.852 * (s->cur.trend_seconds / 3600.0);
             auto [end_lat, end_lon] = dest_point(ac.lat, ac.lon, ac.track, dist_km);
             auto end_px = geo_to_pixel(end_lat, end_lon, zoom, origin_tx, origin_ty);
-            cv::Point p0{static_cast<int>(px.x), static_cast<int>(px.y)};
-            cv::Point p1{static_cast<int>(end_px.x), static_cast<int>(end_px.y)};
-            cv::line(s->canvas, p0, p1, halo,  3, cv::LINE_AA);
-            cv::line(s->canvas, p0, p1, color, 1, cv::LINE_AA);
+            const Point end = px(static_cast<int>(end_px.x), static_cast<int>(end_px.y));
+            list.line(centre, end, 3, rgb(halo));
+            list.line(centre, end, 1, rgb(color));
         }
 
         // selected-aircraft ring: distinct on-map marker for whichever plane
         // the info panel is currently showing, so the list<->map link is obvious.
         if (selected_icao != 0 && ac.icao == selected_icao) {
-            int sel_r = icon_size + 6;
-            cv::circle(s->canvas, {static_cast<int>(px.x), static_cast<int>(px.y)},
-                       sel_r, halo,    3, cv::LINE_AA);
-            cv::circle(s->canvas, {static_cast<int>(px.x), static_cast<int>(px.y)},
-                       sel_r, outline, 1, cv::LINE_AA);
+            const float sel_r = static_cast<float>(icon_size + 6);
+            list.stroke_circle(centre, sel_r, 3, rgb(halo));
+            list.stroke_circle(centre, sel_r, 1, rgb(outline));
         }
 
         // MLAT source indicator: a dashed circle outside the icon signals that
         // the position came from multilateration (~50-500 m accuracy) rather
-        // than the aircraft's own GPS. Drawn as 12 short arc segments for a
-        // visible dash pattern (OpenCV has no dashed-circle primitive).
-        // At low zoom the dashes blur into a solid ring anyway — fall back
-        // to a single cv::circle so 50+ MLAT aircraft don't cost ~600
-        // ellipse calls per frame at continental zoom.
+        // than the aircraft's own GPS. At low zoom the dashes blur into a solid
+        // ring anyway, so it is drawn solid there.
         if (ac.msg_source == 5) {
-            int ix = static_cast<int>(px.x);
-            int iy = static_cast<int>(px.y);
-            int dr = icon_size + 2;
+            const float dr = static_cast<float>(icon_size + 2);
             if (zoom < 11.0) {
-                cv::circle(s->canvas, {ix, iy}, dr, halo, 1);
+                list.stroke_circle(centre, dr, 1, rgb(halo));
             } else {
                 constexpr int n_dashes = 12;
                 constexpr int dash_deg = 360 / (n_dashes * 2);
                 for (int k = 0; k < n_dashes; ++k) {
-                    int a0 = 360 * k / n_dashes;
-                    cv::ellipse(s->canvas, {ix, iy}, {dr, dr}, 0,
-                                a0, a0 + dash_deg, halo, 2, cv::LINE_AA);
+                    const float a0 = static_cast<float>(360 * k / n_dashes);
+                    arc(list, centre, dr, a0, a0 + dash_deg, 2, rgb(halo));
                 }
             }
         }
 
         // emergency alert: pulsing red ring behind the icon
         if (is_emergency(ac)) {
-            int ring_r = icon_size + 4 + static_cast<int>(pulse * 4);
-            int alpha_i = static_cast<int>(180 + 75 * pulse);
-            cv::Scalar red(static_cast<double>(alpha_i), 0, 0);
-            cv::circle(s->canvas, {static_cast<int>(px.x), static_cast<int>(px.y)},
-                       ring_r, red, 2, cv::LINE_AA);
+            const float ring_r = static_cast<float>(icon_size + 4 + static_cast<int>(pulse * 4));
+            const double red = 180 + 75 * pulse;
+            list.stroke_circle(centre, ring_r, 2, rgb({red, 0, 0}));
         }
 
         auto* shape = aircraft_shapes::lookup(
             ac.type_code_str.c_str(), ac.category);
-        draw_aircraft(s->canvas, px, ac.track, color, icon_size, shape, halo);
+        draw_aircraft(list, centre, ac.track, color, icon_size, shape, halo);
 
         if (s->cur.show_labels) {
             // Cached label strings populated in input_parser::read_aircraft_data —
-            // ac.cs_label, ac.alt_label, ac.vs_label — so this loop avoids
-            // std::format and the MLAT-prefix branching repeated for halo+main.
+            // ac.cs_label, ac.alt_label, ac.vs_label.
             int label_offset = std::max(12, static_cast<int>(15 * s->cur.icon_scale));
             cv::Scalar label_color = is_emergency(ac)
                 ? cv::Scalar(255, 0, 0) : outline;
             double fs = static_cast<double>(s->cur.font_size);
-            int lx = static_cast<int>(px.x) + label_offset;
-            int ly = static_cast<int>(px.y) + 4;
+            const TextStyle st = style(font, fs, label_color);
+            int lx = ix + label_offset;
+            int ly = iy + 4;
 
-            spc::ui::draw_text_outlined(s->canvas, ac.cs_label, {lx, ly}, fs,
-                                        label_color, halo);
+            text_outlined(list, lx, ly, ac.cs_label, st, halo);
 
             if (!ac.alt_label.empty()) {
-                int baseline = 0;
-                auto text_sz = cv::getTextSize(ac.cs_label, cv::FONT_HERSHEY_SIMPLEX,
-                                                fs, 1, &baseline);
-                int line_gap = text_sz.height + baseline + 2;
-                int alt_y = ly + line_gap;
-                spc::ui::draw_text_outlined(s->canvas, ac.alt_label, {lx, alt_y}, fs,
-                                            label_color, halo);
+                const auto m = spc::draw::measure_text(ac.cs_label, st);
+                int alt_y = ly + static_cast<int>(std::lround(m.ascent + m.descent)) + 2;
+                text_outlined(list, lx, alt_y, ac.alt_label, st, halo);
 
                 // vertical-speed glyph: small green-up / red-down triangle plus
                 // the rate magnitude, after the altitude text. Prefer geom rate
@@ -208,30 +178,24 @@ void render_aircraft_layer(MapDisplayState* s,
                 // gate covers (show_vs_indicator off) and (|vs| < 300).
                 if (!ac.vs_label.empty()) {
                     int vs_fpm = ac.geom_rate != 0 ? ac.geom_rate : ac.baro_rate;
-                    int alt_baseline = 0;
-                    int alt_w = cv::getTextSize(ac.alt_label, cv::FONT_HERSHEY_SIMPLEX,
-                                                 fs, 1, &alt_baseline).width;
+                    int alt_w = static_cast<int>(std::lround(text_width(ac.alt_label, st)));
                     int gx = lx + alt_w + 6;
                     int th_sz = std::max(5, static_cast<int>(fs * 18.0));
                     int tw = th_sz;
                     bool climbing = vs_fpm > 0;
-                    cv::Point tri[3];
+                    Point tri[3];
                     if (climbing) {
-                        tri[0] = {gx + tw / 2, alt_y - th_sz};
-                        tri[1] = {gx,          alt_y};
-                        tri[2] = {gx + tw,     alt_y};
+                        tri[0] = px(gx + tw / 2, alt_y - th_sz);
+                        tri[1] = px(gx,          alt_y);
+                        tri[2] = px(gx + tw,     alt_y);
                     } else {
-                        tri[0] = {gx,          alt_y - th_sz};
-                        tri[1] = {gx + tw,     alt_y - th_sz};
-                        tri[2] = {gx + tw / 2, alt_y};
+                        tri[0] = px(gx,          alt_y - th_sz);
+                        tri[1] = px(gx + tw,     alt_y - th_sz);
+                        tri[2] = px(gx + tw / 2, alt_y);
                     }
-                    cv::Scalar tri_col = climbing ? cv::Scalar(40, 220, 40)
-                                                  : cv::Scalar(240, 60, 60);
-                    cv::fillConvexPoly(s->canvas, tri, 3, tri_col, cv::LINE_AA);
+                    list.fill_polygon(tri, climbing ? Color{40, 220, 40} : Color{240, 60, 60});
 
-                    cv::Point vs_org{gx + tw + 3, alt_y};
-                    spc::ui::draw_text_outlined(s->canvas, ac.vs_label, vs_org, fs,
-                                                label_color, halo);
+                    text_outlined(list, gx + tw + 3, alt_y, ac.vs_label, st, halo);
                 }
             }
         }

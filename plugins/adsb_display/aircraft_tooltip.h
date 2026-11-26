@@ -3,11 +3,15 @@
 // click info panel: detailed aircraft information anchored to an aircraft icon
 
 #include "adsb_display_state.h"
+#include "country_flags.h"
+#include "draw_helpers.h"
+#include <draw/image.h>
 #include <spc_ui_theme.h>
 
 #include <chrono>
 #include <cmath>
 #include <format>
+#include <string_view>
 
 namespace adsb_tooltip {
 
@@ -41,7 +45,7 @@ inline cv::Scalar rssi_color(int level)
 }
 
 // draw 5-bar signal indicator (like WiFi/cell bars)
-inline void draw_signal_bars(cv::Mat& canvas, int x, int y, int h,
+inline void draw_signal_bars(adsb_draw::DrawList& list, int x, int y, int h,
                              int level, const cv::Scalar& color)
 {
     constexpr int NUM_BARS = 5;
@@ -53,11 +57,17 @@ inline void draw_signal_bars(cv::Mat& canvas, int x, int y, int h,
         int bx = x + i * (BAR_W + BAR_GAP);
         int by = y + h - bar_h;
         auto c = (i < level) ? color : cv::Scalar(0x45, 0x42, 0x58);  // dim unfilled
-        cv::rectangle(canvas, {bx, by, BAR_W, bar_h}, c, cv::FILLED);
+        adsb_draw::fill_px(list, bx, by, bx + BAR_W - 1, by + bar_h - 1, adsb_draw::rgb(c));
     }
 }
 
 // ── helpers ───────────────────────────────────────────────────────────
+
+// rounded up to whole pixels, for layout that continues in integer pixels
+inline int text_width_px(std::string_view s, const adsb_draw::TextStyle& st)
+{
+    return static_cast<int>(std::ceil(adsb_draw::text_width(s, st)));
+}
 
 inline const char* type_label(uint8_t category, uint8_t db_flags)
 {
@@ -101,7 +111,8 @@ inline const char* emergency_name(uint8_t code)
 
 struct PanelCtx
 {
-    cv::Mat& canvas;
+    adsb_draw::DrawList& list;
+    int32_t font;
     int x, w;            // panel left edge and width
     int cy;              // current y cursor (advances after each row)
     double fs;           // base font scale
@@ -118,6 +129,7 @@ struct PanelCtx
     int grid_label_w = -1;
     int value_x_off(const char* label)
     {
+        const auto st = adsb_draw::style(font, fs, th.text, true);
         if (grid_label_w < 0) {
             static constexpr const char* kGridLabels[] = {
                 "ALT", "VS", "GS", "HDG", "TGT", "ICAO",
@@ -125,11 +137,11 @@ struct PanelCtx
             };
             grid_label_w = 0;
             for (const char* l : kGridLabels)
-                grid_label_w = std::max(grid_label_w, spc::ui::measure_text(l, fs).width);
+                grid_label_w = std::max(grid_label_w, text_width_px(l, st));
         }
         // gap scales with the font so it stays readable at any card size
-        const int gap = std::max(6, spc::ui::measure_text("00", fs).width);
-        return std::max(grid_label_w, spc::ui::measure_text(label, fs).width) + gap;
+        const int gap = std::max(6, text_width_px("00", st));
+        return std::max(grid_label_w, text_width_px(label, st)) + gap;
     }
 
     // draw a label: value     label2: value2 row
@@ -137,33 +149,31 @@ struct PanelCtx
               const char* l2, const std::string& v2)
     {
         int half = w / 2;
-        auto lc = th.subtext;
-        auto vc = th.text;
+        const auto lc = adsb_draw::style(font, fs, th.subtext, true);
+        const auto vc = adsb_draw::style(font, fs, th.text, true);
         // left column
-        spc::ui::draw_text_vcenter(canvas, x + TT_PAD, cy, line_h, l1, lc, fs);
-        spc::ui::draw_text_vcenter(canvas, x + TT_PAD + value_x_off(l1), cy, line_h,
-                                   v1.c_str(), vc, fs);
+        adsb_draw::text_vcenter(list, x + TT_PAD, cy, line_h, l1, lc);
+        adsb_draw::text_vcenter(list, x + TT_PAD + value_x_off(l1), cy, line_h, v1, vc);
         // right column
-        spc::ui::draw_text_vcenter(canvas, x + half, cy, line_h, l2, lc, fs);
-        spc::ui::draw_text_vcenter(canvas, x + half + value_x_off(l2), cy, line_h,
-                                   v2.c_str(), vc, fs);
+        adsb_draw::text_vcenter(list, x + half, cy, line_h, l2, lc);
+        adsb_draw::text_vcenter(list, x + half + value_x_off(l2), cy, line_h, v2, vc);
         cy += line_h;
     }
 
     void row1(const char* l1, const std::string& v1)
     {
-        auto lc = th.subtext;
-        auto vc = th.text;
-        spc::ui::draw_text_vcenter(canvas, x + TT_PAD, cy, line_h, l1, lc, fs);
-        spc::ui::draw_text_vcenter(canvas, x + TT_PAD + value_x_off(l1), cy, line_h,
-                                   v1.c_str(), vc, fs);
+        const auto lc = adsb_draw::style(font, fs, th.subtext, true);
+        const auto vc = adsb_draw::style(font, fs, th.text, true);
+        adsb_draw::text_vcenter(list, x + TT_PAD, cy, line_h, l1, lc);
+        adsb_draw::text_vcenter(list, x + TT_PAD + value_x_off(l1), cy, line_h, v1, vc);
         cy += line_h;
     }
 
     void separator()
     {
         cy += 2;
-        cv::line(canvas, {x + TT_PAD, cy}, {x + w - TT_PAD, cy}, th.surface1, 1);
+        list.line(adsb_draw::px(x + TT_PAD, cy), adsb_draw::px(x + w - TT_PAD, cy), 1,
+                  adsb_draw::rgb(th.surface1));
         cy += 4;
     }
 };
@@ -171,13 +181,13 @@ struct PanelCtx
 // ── rendering ─────────────────────────────────────────────────────────
 
 inline void render_tooltip(
-    cv::Mat& canvas,
+    adsb_draw::DrawList& list, int32_t font, int canvas_w, int canvas_h,
     uint32_t target_icao,
     float anchor_x, float anchor_y,
     const std::vector<AircraftView>& aircraft,
-    CountryFlagCache& flags,
+    const CountryFlagCache& flags,
     const std::unordered_map<uint32_t, std::chrono::steady_clock::time_point>& first_seen,
-    const std::unordered_map<uint32_t, cv::Mat>& photo_cache,
+    const std::unordered_map<uint32_t, spc::draw::Image>& photos,
     float font_size,
     float opacity = 0.92f,
     bool has_gps = false, double gps_lat = 0.0, double gps_lon = 0.0,
@@ -218,10 +228,10 @@ inline void render_tooltip(
     bool has_airline = !ac->airline_name.empty();
     bool has_manufacturer = !ac->manufacturer.empty() || !ac->aircraft_type.empty();
     bool has_photo = false;
-    const cv::Mat* photo = nullptr;
+    const spc::draw::Image* photo = nullptr;
     {
-        auto pit = photo_cache.find(ac->icao);
-        if (pit != photo_cache.end() && !pit->second.empty()) {
+        auto pit = photos.find(ac->icao);
+        if (pit != photos.end() && !pit->second.empty()) {
             photo = &pit->second;
             has_photo = true;
         }
@@ -247,7 +257,7 @@ inline void render_tooltip(
     if (has_airline) content_h += line_h;             // airline
     if (has_route) content_h += line_h;                  // origin + destination (two columns)
     if (has_manufacturer) content_h += line_h;        // manufacturer + type
-    if (has_photo) content_h += 6 + photo->rows + 4; // separator + photo + pad
+    if (has_photo) content_h += 6 + static_cast<int>(photo->height()) + 4; // separator + photo + pad
     if (ac->on_ground) content_h += line_h;           // ground status
     content_h += TT_PAD;
     int tt_h = content_h;
@@ -256,40 +266,40 @@ inline void render_tooltip(
     int tt_x = static_cast<int>(anchor_x) + TT_OFFSET;
     int tt_y = static_cast<int>(anchor_y) + TT_OFFSET;
 
-    if (tt_x + tt_w > canvas.cols - 5)
+    if (tt_x + tt_w > canvas_w - 5)
         tt_x = static_cast<int>(anchor_x) - TT_OFFSET - tt_w;
-    if (tt_y + tt_h > canvas.rows - 5)
+    if (tt_y + tt_h > canvas_h - 5)
         tt_y = static_cast<int>(anchor_y) - TT_OFFSET - tt_h;
 
-    tt_x = std::clamp(tt_x, 2, std::max(2, canvas.cols - tt_w - 2));
-    tt_y = std::clamp(tt_y, 2, std::max(2, canvas.rows - tt_h - 2));
+    tt_x = std::clamp(tt_x, 2, std::max(2, canvas_w - tt_w - 2));
+    tt_y = std::clamp(tt_y, 2, std::max(2, canvas_h - tt_h - 2));
 
     // ── draw background ───────────────────────────────────────────────
-    cv::Mat roi = canvas(cv::Rect(tt_x, tt_y, tt_w, tt_h));
-    cv::Mat overlay(tt_h, tt_w, CV_8UC3, theme.panel_bg);
-    cv::addWeighted(overlay, static_cast<double>(opacity), roi, 1.0 - static_cast<double>(opacity), 0, roi);
+    adsb_draw::fill_px(list, tt_x, tt_y, tt_x + tt_w - 1, tt_y + tt_h - 1,
+                       adsb_draw::rgb(theme.panel_bg, opacity));
 
-    // border: red 2px for emergency, normal 1px otherwise
     if (is_emergency)
-        cv::rectangle(canvas, {tt_x, tt_y, tt_w, tt_h}, theme.red, 2);
+        adsb_draw::stroke_px(list, tt_x, tt_y, tt_x + tt_w - 1, tt_y + tt_h - 1,
+                             adsb_draw::rgb(theme.red), 2);
     else
-        cv::rectangle(canvas, {tt_x, tt_y, tt_w, tt_h}, theme.surface2, 1);
+        adsb_draw::stroke_px(list, tt_x, tt_y, tt_x + tt_w - 1, tt_y + tt_h - 1,
+                             adsb_draw::rgb(theme.surface2), 1);
 
     // accent bar on the left (skip for emergency — red border is enough)
     if (!is_emergency) {
         auto accent = type_color(ac->category, ac->db_flags);
-        cv::rectangle(canvas, {tt_x, tt_y, 3, tt_h}, accent, cv::FILLED);
+        adsb_draw::fill_px(list, tt_x, tt_y, tt_x + 2, tt_y + tt_h - 1, adsb_draw::rgb(accent));
     }
 
     // ── draw content ──────────────────────────────────────────────────
-    PanelCtx ctx{canvas, tt_x, tt_w, tt_y + TT_PAD, fs, line_h, theme};
+    PanelCtx ctx{list, font, tt_x, tt_w, tt_y + TT_PAD, fs, line_h, theme};
 
     // emergency banner
     if (is_emergency) {
         auto* ename = emergency_name(ac->emergency);
         if (ename) {
-            spc::ui::draw_text_vcenter(canvas, tt_x + TT_PAD, ctx.cy, line_h,
-                                       ename, theme.red, fs);
+            adsb_draw::text_vcenter(list, tt_x + TT_PAD, ctx.cy, line_h, ename,
+                                    adsb_draw::style(font, fs, theme.red, true));
         }
         ctx.cy += line_h;
     }
@@ -299,8 +309,8 @@ inline void render_tooltip(
         // callsign or ICAO hex as fallback
         std::string cs = ac->callsign.empty()
             ? std::format("{:06X}", ac->icao) : ac->callsign;
-        spc::ui::draw_text_vcenter(canvas, tt_x + TT_PAD, ctx.cy, line_h_big,
-                                   cs.c_str(), theme.text, fs_big);
+        adsb_draw::text_vcenter(list, tt_x + TT_PAD, ctx.cy, line_h_big, cs,
+                                adsb_draw::style(font, fs_big, theme.text, true));
 
         // right side: [type_code] [flag] CC
         int rx = tt_x + tt_w - TT_PAD;
@@ -312,28 +322,22 @@ inline void render_tooltip(
                 static_cast<char>(std::toupper(static_cast<unsigned char>(ac->country_code[1]))),
                 '\0'
             };
-            auto cc_sz = spc::ui::measure_text(cc_upper, fs);
-            rx -= cc_sz.width;
-            spc::ui::draw_text_vcenter(canvas, rx, ctx.cy, line_h_big,
-                                       cc_upper, theme.subtext, fs);
+            const auto cc_st = adsb_draw::style(font, fs, theme.subtext, true);
+            rx -= text_width_px(cc_upper, cc_st);
+            adsb_draw::text_vcenter(list, rx, ctx.cy, line_h_big, cc_upper, cc_st);
 
-            // flag image
-            const auto& flag_img = flags.get(ac->country_code);
-            rx -= flag_img.cols + 3;
-            int fy = ctx.cy + (line_h_big - flag_img.rows) / 2;
-            if (rx >= tt_x && fy >= tt_y &&
-                rx + flag_img.cols <= canvas.cols && fy + flag_img.rows <= canvas.rows) {
-                flag_img.copyTo(canvas(cv::Rect(rx, fy, flag_img.cols, flag_img.rows)));
-            }
+            rx -= CountryFlagCache::FLAG_W + 3;
+            int fy = ctx.cy + (line_h_big - CountryFlagCache::FLAG_H) / 2;
+            if (rx >= tt_x && fy >= tt_y)
+                draw_flag(list, font, flags, ac->country_code, rx, fy);
             rx -= 4;
         }
 
         // type code (e.g., "A333")
         if (!ac->type_code_str.empty()) {
-            auto tc_sz = spc::ui::measure_text(ac->type_code_str.c_str(), fs);
-            rx -= tc_sz.width;
-            spc::ui::draw_text_vcenter(canvas, rx, ctx.cy, line_h_big,
-                                       ac->type_code_str.c_str(), theme.blue, fs);
+            const auto tc_st = adsb_draw::style(font, fs, theme.blue, true);
+            rx -= text_width_px(ac->type_code_str, tc_st);
+            adsb_draw::text_vcenter(list, rx, ctx.cy, line_h_big, ac->type_code_str, tc_st);
         }
 
         ctx.cy += line_h_big;
@@ -341,8 +345,8 @@ inline void render_tooltip(
 
     // ── registration (below callsign, smaller + dimmer) ──────────────
     if (has_reg) {
-        spc::ui::draw_text_vcenter(canvas, tt_x + TT_PAD, ctx.cy, line_h,
-                                   ac->registration.c_str(), theme.subtext, fs);
+        adsb_draw::text_vcenter(list, tt_x + TT_PAD, ctx.cy, line_h, ac->registration,
+                                adsb_draw::style(font, fs, theme.subtext, true));
         ctx.cy += line_h;
     }
 
@@ -354,13 +358,12 @@ inline void render_tooltip(
         auto tc = type_color(ac->category, ac->db_flags);
 
         if (!left.empty())
-            spc::ui::draw_text_vcenter(canvas, tt_x + TT_PAD, ctx.cy, line_h,
-                                       left.c_str(), theme.subtext, fs);
+            adsb_draw::text_vcenter(list, tt_x + TT_PAD, ctx.cy, line_h, left,
+                                    adsb_draw::style(font, fs, theme.subtext, true));
 
-        // right-align type label
-        auto tl_sz = spc::ui::measure_text(tl, fs);
-        spc::ui::draw_text_vcenter(canvas, tt_x + tt_w - TT_PAD - tl_sz.width,
-                                   ctx.cy, line_h, tl, tc, fs);
+        const auto tl_st = adsb_draw::style(font, fs, tc, true);
+        adsb_draw::text_vcenter(list, tt_x + tt_w - TT_PAD - adsb_draw::text_width(tl, tl_st),
+                                ctx.cy, line_h, tl, tl_st);
         ctx.cy += line_h;
     }
 
@@ -403,8 +406,8 @@ inline void render_tooltip(
             : "---";
         std::string mach_s = (ac->mach_num > 0.001f) ? std::format("{:.2f}", ac->mach_num) : "---";
         auto combined = std::format("IAS {}  TAS {}  M {}", ias_s, tas_s, mach_s);
-        spc::ui::draw_text_vcenter(canvas, tt_x + TT_PAD, ctx.cy, line_h,
-                                   combined.c_str(), theme.subtext, fs);
+        adsb_draw::text_vcenter(list, tt_x + TT_PAD, ctx.cy, line_h, combined,
+                                adsb_draw::style(font, fs, theme.subtext, true));
         ctx.cy += line_h;
     }
 
@@ -422,8 +425,8 @@ inline void render_tooltip(
         if (ac->alert) tokens += "ALERT";
         cv::Scalar flag_col = ac->alert ? cv::Scalar(240, 80, 80)
                                         : cv::Scalar(240, 200, 60);
-        spc::ui::draw_text_vcenter(canvas, tt_x + TT_PAD, ctx.cy, line_h,
-                                   tokens.c_str(), flag_col, fs);
+        adsb_draw::text_vcenter(list, tt_x + TT_PAD, ctx.cy, line_h, tokens,
+                                adsb_draw::style(font, fs, flag_col, true));
         ctx.cy += line_h;
     }
 
@@ -435,17 +438,17 @@ inline void render_tooltip(
             int level = rssi_level(ac->rssi);
             auto color = rssi_color(level);
 
-            spc::ui::draw_text_vcenter(canvas, tt_x + TT_PAD, ctx.cy, line_h,
-                                       "SIG", theme.subtext, fs);
+            adsb_draw::text_vcenter(list, tt_x + TT_PAD, ctx.cy, line_h, "SIG",
+                                    adsb_draw::style(font, fs, theme.subtext, true));
             // same value column as the rows above/below, not "SIG" plus its own width
             int bar_x = tt_x + TT_PAD + ctx.value_x_off("SIG");
             int bar_h = line_h - 4;
-            draw_signal_bars(canvas, bar_x, ctx.cy + 2, bar_h, level, color);
+            draw_signal_bars(list, bar_x, ctx.cy + 2, bar_h, level, color);
 
             auto db_str = std::format("{:.0f} dB", db);
             int bars_w = 5 * 3 + 4 * 2;  // 5 bars * width + 4 gaps
-            spc::ui::draw_text_vcenter(canvas, bar_x + bars_w + 4, ctx.cy, line_h,
-                                       db_str.c_str(), color, fs);
+            adsb_draw::text_vcenter(list, bar_x + bars_w + 4, ctx.cy, line_h, db_str,
+                                    adsb_draw::style(font, fs, color, true));
         }
 
         // right: tracked time
@@ -462,10 +465,10 @@ inline void render_tooltip(
                     trk_v = std::format("{}h {}m", secs / 3600, (secs % 3600) / 60);
             }
             int half = tt_w / 2;
-            spc::ui::draw_text_vcenter(canvas, tt_x + half, ctx.cy, line_h,
-                                       "TRK", theme.subtext, fs);
-            spc::ui::draw_text_vcenter(canvas, tt_x + half + ctx.value_x_off("TRK"),
-                                       ctx.cy, line_h, trk_v.c_str(), theme.text, fs);
+            adsb_draw::text_vcenter(list, tt_x + half, ctx.cy, line_h, "TRK",
+                                    adsb_draw::style(font, fs, theme.subtext, true));
+            adsb_draw::text_vcenter(list, tt_x + half + ctx.value_x_off("TRK"), ctx.cy, line_h,
+                                    trk_v, adsb_draw::style(font, fs, theme.text, true));
         }
 
         ctx.cy += line_h;
@@ -518,19 +521,16 @@ inline void render_tooltip(
     if (has_photo && photo) {
         ctx.separator();
         // center the thumbnail horizontally
-        int px = tt_x + (tt_w - photo->cols) / 2;
+        int px = tt_x + (tt_w - static_cast<int>(photo->width())) / 2;
         int py = ctx.cy;
-        if (px >= 0 && py >= 0 &&
-            px + photo->cols <= canvas.cols && py + photo->rows <= canvas.rows) {
-            photo->copyTo(canvas(cv::Rect(px, py, photo->cols, photo->rows)));
-        }
-        ctx.cy += photo->rows + 4;
+        adsb_draw::image_at(list, *photo, px, py);
+        ctx.cy += static_cast<int>(photo->height()) + 4;
     }
 
     // ground status (only when on ground)
     if (ac->on_ground) {
-        spc::ui::draw_text_vcenter(canvas, tt_x + TT_PAD, ctx.cy, line_h,
-                                   "ON GROUND", theme.yellow, fs);
+        adsb_draw::text_vcenter(list, tt_x + TT_PAD, ctx.cy, line_h, "ON GROUND",
+                                adsb_draw::style(font, fs, theme.yellow, true));
         ctx.cy += line_h;
     }
 }

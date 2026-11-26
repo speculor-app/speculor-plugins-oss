@@ -18,7 +18,14 @@
 #include "color_palette.h"
 #include "openaip_loader.h"
 #include "unit_format.h"
-#include <spc_ui_panel.h>
+#include "draw_helpers.h"
+
+#include <draw/cpu_drawer.h>
+#include <draw/draw_list.h>
+#include <draw/image.h>
+#ifdef SPC_HAS_VULKAN
+#include <draw/gpu_drawer.h>
+#endif
 
 #include <opencv2/imgproc.hpp>
 #include <opencv2/imgcodecs.hpp>
@@ -371,10 +378,10 @@ struct TrailHistory
 namespace aircraft_shapes { struct Shape; }
 
 // draw rotated airplane silhouette (uses shape data if provided, fallback otherwise)
-void draw_aircraft(cv::Mat& canvas, cv::Point2d pos, float track_deg,
-                   cv::Scalar color, int size,
+void draw_aircraft(spc::draw::DrawList& list, spc::draw::Point pos, float track_deg,
+                   const cv::Scalar& color, int size,
                    const aircraft_shapes::Shape* shape,
-                   cv::Scalar halo_color);
+                   const cv::Scalar& halo_color);
 
 // ── aircraft view (declared before MapDisplayState for use as cached member) ──
 
@@ -469,7 +476,7 @@ struct AirportScreenPos
 // Captures every input that can affect the static-layer rendering
 // (tiles + airspace + airports + range rings + max range). When two
 // frames produce identical keys, the static layers can be skipped and
-// the previously-rendered map area blitted from a cached cv::Mat.
+// the previously-rendered map area reused.
 //
 // All fields are POD so equality is a memberwise compare. Floats are
 // quantized when they come from a continuous source (zoom, origin,
@@ -514,6 +521,7 @@ struct BackgroundKey
     int32_t  show_max_range     = 0;
 
     // styles + filters
+    int32_t  font               = 0;
     int32_t  map_style          = 0;
     int32_t  airspace_classes   = 0;
     int32_t  airspace_altitude_ft = 0;
@@ -554,17 +562,29 @@ struct MapDisplayState
 {
     spc::HostServices host;
 
-    cv::Mat canvas;
     SpcFrame output_frame{};
+    cv::Mat canvas;  // the frame drawn when the host lends no pool frame
 
-    // Sticky background cache. Holds the last-rendered map_rect contents
-    // (tiles + airspace + airports + range rings + max range). When the
-    // current frame's BackgroundKey equals bg_key and bg_cache is valid,
-    // the static-layer calls are skipped and bg_cache is blitted into
-    // canvas(map_rect) instead. Captures back into bg_cache on cache miss.
-    cv::Mat bg_cache;
+    // Sticky background: the map area's static layers (tiles + airspace +
+    // airports + range rings + max range), drawn on the CPU only when the
+    // BackgroundKey changes. bg_image is its copy for GpuDrawer, refreshed
+    // when bg_image_stale.
+    cv::Mat bg_rgb;
     BackgroundKey bg_key;
     bool bg_key_valid = false;
+    spc::draw::Image bg_image;
+    bool bg_image_stale = true;
+
+    // what the frame draws over the background, refilled each frame; and the
+    // static layers' list, refilled when the background is drawn again
+    spc::draw::DrawList list;
+    spc::draw::DrawList static_list;
+    spc::draw::CpuDrawer cpu_drawer;
+#ifdef SPC_HAS_VULKAN
+    std::shared_ptr<spc::gpu::VulkanContext> vk;
+    spc::draw::GpuDrawer gpu_drawer;
+    bool gpu_ready = false;
+#endif
 
     TileCache tile_cache;
     DownloadQueue download_queue;
@@ -581,6 +601,7 @@ struct MapDisplayState
     {
         int32_t width = 1200;
         int32_t height = 800;
+        int32_t font = 0;  // spc::draw::Font
         int32_t map_style = MAP_STYLE_DARK;
         char custom_server[SPC_PARAM_STRING_MAX] = "tile.openstreetmap.org";
         int32_t show_labels = 1;
@@ -855,11 +876,13 @@ struct MapDisplayState
             pending.push_back({icao, url});
         }
 
-        void drain_completed(std::unordered_map<uint32_t, cv::Mat>& cache) {
+        void drain_completed(std::unordered_map<uint32_t, spc::draw::Image>& cache) {
             std::lock_guard lock(mutex);
             while (!completed.empty()) {
                 auto& r = completed.front();
-                cache[r.icao] = std::move(r.thumbnail);
+                cache[r.icao].assign(r.thumbnail.data, static_cast<uint32_t>(r.thumbnail.cols),
+                                     static_cast<uint32_t>(r.thumbnail.rows),
+                                     static_cast<uint32_t>(r.thumbnail.step[0]), SPC_PIXEL_FORMAT_RGB24);
                 completed.pop_front();
             }
         }
@@ -941,10 +964,37 @@ struct MapDisplayState
     };
 
     PhotoDownloadQueue photo_queue;
-    std::unordered_map<uint32_t, cv::Mat> photo_cache;   // ICAO → thumbnail
+    std::unordered_map<uint32_t, spc::draw::Image> photo_cache;   // ICAO → thumbnail
 
     // ── map overlay buttons ───────────────────────────────────────────
-    spc::ui::Panel ui_buttons{spc::ui::Theme{}};
+    // "Center GPS" and "Fit All", top-left of the map. The worker lays them
+    // out as it draws them; the event thread records a click on one for the
+    // worker's next frame, and lets the map have the event too.
+    struct MapButtons {
+        std::mutex mutex;
+        cv::Rect rects[2];
+        int canvas_w = 0, canvas_h = 0;
+        std::atomic<bool> clicked[2] = {false, false};
+
+        void publish(const cv::Rect& a, const cv::Rect& b, int w, int h) {
+            std::lock_guard lock(mutex);
+            rects[0] = a;
+            rects[1] = b;
+            canvas_w = w;
+            canvas_h = h;
+        }
+
+        void handle_event(const SpcUiInput* e) {
+            if (e->type != SPC_UI_MOUSE_PRESS || e->mouse.button != SPC_MOUSE_BUTTON_LEFT) return;
+            std::lock_guard lock(mutex);
+            const int px = static_cast<int>(e->mouse.x * static_cast<float>(canvas_w));
+            const int py = static_cast<int>(e->mouse.y * static_cast<float>(canvas_h));
+            for (int i = 0; i < 2; ++i)
+                if (rects[i].contains(cv::Point(px, py))) clicked[i].store(true, std::memory_order_relaxed);
+        }
+
+        bool take_click(int i) { return clicked[i].exchange(false, std::memory_order_relaxed); }
+    } map_buttons;
 
     // ── waypoints (list parameter) ───────────────────────────────────
     struct Waypoint {

@@ -1,9 +1,8 @@
 #include "airspace_layer.h"
 #include "adsb_display_state.h"
 #include "color_palette.h"
+#include "draw_helpers.h"
 #include "geo_helpers.h"
-
-#include <opencv2/imgproc.hpp>
 
 #include <algorithm>
 #include <cstdint>
@@ -11,9 +10,8 @@
 
 namespace {
 
-// Per-class fill / outline colors. RGB (canvas is RGB, not BGR).
-// Fills end up at airspace_opacity strength after alpha blend; outlines
-// draw at full opacity on top so boundaries stay legible.
+// Per-class fill / outline colors, RGB. Fills are drawn at airspace_opacity;
+// outlines at full opacity on top so boundaries stay legible.
 struct ClassStyle { cv::Scalar fill; cv::Scalar outline; };
 
 ClassStyle style_for(AirspaceFeature::Class k)
@@ -71,7 +69,7 @@ bool altitude_matches(const AirspaceFeature& a, int32_t alt_ft)
 
 } // namespace
 
-void render_airspace_layer(MapDisplayState* s,
+void render_airspace_layer(MapDisplayState* s, adsb_draw::DrawList& list,
                            double zoom, double origin_tx, double origin_ty,
                            int map_w, int h)
 {
@@ -93,19 +91,12 @@ void render_airspace_layer(MapDisplayState* s,
 
     float opacity = std::clamp(s->cur.airspace_opacity, 0.0f, 1.0f);
 
-    cv::Rect map_rect(0, 0, map_w, h);
-    cv::Mat map_roi = s->canvas(map_rect);
-    cv::Mat overlay;
-    bool blend = opacity < 0.99f;
-    if (blend) overlay = map_roi.clone();
-    cv::Mat& fill_target = blend ? overlay : map_roi;
-
     // Stash the projected pixel rings as we go so the outline pass can
     // reuse them without re-projecting every vertex, and publish the
     // indices of airspaces that actually render so click hit-testing
     // only considers visible polygons.
     struct Projected {
-        std::vector<cv::Point> pts;
+        std::vector<adsb_draw::Point> pts;
         cv::Scalar outline;
     };
     std::vector<Projected> visible;
@@ -127,8 +118,8 @@ void render_airspace_layer(MapDisplayState* s,
         Projected pr;
         pr.pts.reserve(a.ring_lat_lon.size());
         for (const auto& [lat, lon] : a.ring_lat_lon) {
-            auto px = geo_to_pixel(lat, lon, zoom, origin_tx, origin_ty);
-            pr.pts.emplace_back(static_cast<int>(px.x), static_cast<int>(px.y));
+            auto p = geo_to_pixel(lat, lon, zoom, origin_tx, origin_ty);
+            pr.pts.push_back(adsb_draw::px(static_cast<int>(p.x), static_cast<int>(p.y)));
         }
         if (pr.pts.size() < 3) continue;
 
@@ -139,21 +130,13 @@ void render_airspace_layer(MapDisplayState* s,
         // stacking, filling them all turns the map into an opaque blob.
         // Restricted / P-R-D / MATZ still fill so they pop as "watch out".
         if (a.klass == AirspaceFeature::Class::Restricted) {
-            cv::fillPoly(fill_target, std::vector<std::vector<cv::Point>>{pr.pts},
-                         style.fill, cv::LINE_AA);
+            list.fill_polygon(pr.pts, adsb_draw::rgb(style.fill, opacity));
         }
         visible.push_back(std::move(pr));
         visible_idx.push_back(static_cast<int32_t>(i));
     }
 
-    if (blend)
-        cv::addWeighted(overlay, opacity, map_roi, 1.0 - opacity, 0, map_roi);
-
-    // Outlines drawn directly on the canvas at full opacity so polygon
-    // boundaries stay crisp regardless of the fill opacity.
-    for (const auto& pr : visible) {
-        cv::polylines(map_roi, pr.pts, true, pr.outline, 1, cv::LINE_AA);
-    }
+    for (const auto& pr : visible) adsb_draw::stroke_polygon(list, pr.pts, 1, adsb_draw::rgb(pr.outline));
 
     s->visible_airspace_active.store(build_idx, std::memory_order_release);
 }

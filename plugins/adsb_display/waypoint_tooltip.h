@@ -8,13 +8,13 @@
 #include "adsb_display_state.h"
 #include "unit_format.h"
 #include "aircraft_tooltip.h"   // reuse PanelCtx, TT_PAD, TT_OFFSET
+#include "draw_helpers.h"
 
 #include <spc_ui_theme.h>
 
 #include <algorithm>
 #include <cstdint>
 #include <format>
-#include <opencv2/imgproc.hpp>
 #include <string>
 
 namespace adsb_waypoint_tooltip {
@@ -44,7 +44,7 @@ inline cv::Scalar accent_for(int32_t type, int32_t map_style)
 }
 
 inline void render_waypoint_tooltip(
-    cv::Mat& canvas,
+    adsb_draw::DrawList& list, int32_t font, int canvas_w, int canvas_h,
     int32_t waypoint_idx,
     float anchor_x, float anchor_y,
     const std::vector<MapDisplayState::Waypoint>& waypoints,
@@ -78,38 +78,36 @@ inline void render_waypoint_tooltip(
 
     int tt_x = static_cast<int>(anchor_x) + adsb_tooltip::TT_OFFSET;
     int tt_y = static_cast<int>(anchor_y) + adsb_tooltip::TT_OFFSET;
-    if (tt_x + tt_w > canvas.cols - 5)
+    if (tt_x + tt_w > canvas_w - 5)
         tt_x = static_cast<int>(anchor_x) - adsb_tooltip::TT_OFFSET - tt_w;
-    if (tt_y + tt_h > canvas.rows - 5)
+    if (tt_y + tt_h > canvas_h - 5)
         tt_y = static_cast<int>(anchor_y) - adsb_tooltip::TT_OFFSET - tt_h;
-    tt_x = std::clamp(tt_x, 2, std::max(2, canvas.cols - tt_w - 2));
-    tt_y = std::clamp(tt_y, 2, std::max(2, canvas.rows - tt_h - 2));
+    tt_x = std::clamp(tt_x, 2, std::max(2, canvas_w - tt_w - 2));
+    tt_y = std::clamp(tt_y, 2, std::max(2, canvas_h - tt_h - 2));
 
-    cv::Mat roi = canvas(cv::Rect(tt_x, tt_y, tt_w, tt_h));
-    cv::Mat overlay(tt_h, tt_w, CV_8UC3, theme.panel_bg);
-    cv::addWeighted(overlay, static_cast<double>(opacity),
-                    roi, 1.0 - static_cast<double>(opacity), 0, roi);
-    cv::rectangle(canvas, {tt_x, tt_y, tt_w, tt_h}, theme.surface2, 1);
+    adsb_draw::fill_px(list, tt_x, tt_y, tt_x + tt_w - 1, tt_y + tt_h - 1,
+                       adsb_draw::rgb(theme.panel_bg, opacity));
+    adsb_draw::stroke_px(list, tt_x, tt_y, tt_x + tt_w - 1, tt_y + tt_h - 1,
+                         adsb_draw::rgb(theme.surface2), 1);
 
     cv::Scalar accent = accent_for(wp.type, map_style);
-    cv::rectangle(canvas, {tt_x, tt_y, 3, tt_h}, accent, cv::FILLED);
+    adsb_draw::fill_px(list, tt_x, tt_y, tt_x + 2, tt_y + tt_h - 1, adsb_draw::rgb(accent));
 
-    adsb_tooltip::PanelCtx ctx{canvas, tt_x, tt_w, tt_y + adsb_tooltip::TT_PAD,
+    adsb_tooltip::PanelCtx ctx{list, font, tt_x, tt_w, tt_y + adsb_tooltip::TT_PAD,
                                fs, line_h, theme};
 
     // Header: name (big) on the left, type tag right-aligned in accent color.
     {
         std::string left = has_name ? std::string{wp.name} : std::string{"<unnamed>"};
         if (left.size() > 24) left = left.substr(0, 21) + "...";
-        spc::ui::draw_text_vcenter(canvas,
-            tt_x + adsb_tooltip::TT_PAD, ctx.cy, line_h_big,
-            left.c_str(), theme.text, fs_big);
+        adsb_draw::text_vcenter(list, tt_x + adsb_tooltip::TT_PAD, ctx.cy, line_h_big, left,
+                                adsb_draw::style(font, fs_big, theme.text, true));
 
         const char* tl = type_label(wp.type);
-        auto tl_sz = spc::ui::measure_text(tl, fs);
-        spc::ui::draw_text_vcenter(canvas,
-            tt_x + tt_w - adsb_tooltip::TT_PAD - tl_sz.width,
-            ctx.cy, line_h_big, tl, accent, fs);
+        const auto tl_st = adsb_draw::style(font, fs, accent, true);
+        adsb_draw::text_vcenter(list,
+            tt_x + tt_w - adsb_tooltip::TT_PAD - adsb_draw::text_width(tl, tl_st),
+            ctx.cy, line_h_big, tl, tl_st);
         ctx.cy += line_h_big;
     }
 

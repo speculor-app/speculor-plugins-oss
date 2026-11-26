@@ -7,6 +7,7 @@
 #include "adsb_display_state.h"
 #include "unit_format.h"
 #include "aircraft_tooltip.h"   // reuse PanelCtx, TT_PAD, TT_OFFSET
+#include "draw_helpers.h"
 
 #include <spc_ui_theme.h>
 
@@ -41,7 +42,7 @@ inline std::string format_airspace_alt(int ft, bool is_ceiling, int32_t unit_sys
 }
 
 inline void render_airspace_tooltip(
-    cv::Mat& canvas,
+    adsb_draw::DrawList& list, int32_t font, int canvas_w, int canvas_h,
     int32_t airspace_idx,
     float anchor_x, float anchor_y,
     const std::vector<AirspaceFeature>& airspaces,
@@ -75,28 +76,26 @@ inline void render_airspace_tooltip(
 
     int tt_x = static_cast<int>(anchor_x) + adsb_tooltip::TT_OFFSET;
     int tt_y = static_cast<int>(anchor_y) + adsb_tooltip::TT_OFFSET;
-    if (tt_x + tt_w > canvas.cols - 5)
+    if (tt_x + tt_w > canvas_w - 5)
         tt_x = static_cast<int>(anchor_x) - adsb_tooltip::TT_OFFSET - tt_w;
-    if (tt_y + tt_h > canvas.rows - 5)
+    if (tt_y + tt_h > canvas_h - 5)
         tt_y = static_cast<int>(anchor_y) - adsb_tooltip::TT_OFFSET - tt_h;
-    tt_x = std::clamp(tt_x, 2, std::max(2, canvas.cols - tt_w - 2));
-    tt_y = std::clamp(tt_y, 2, std::max(2, canvas.rows - tt_h - 2));
+    tt_x = std::clamp(tt_x, 2, std::max(2, canvas_w - tt_w - 2));
+    tt_y = std::clamp(tt_y, 2, std::max(2, canvas_h - tt_h - 2));
 
-    // background
-    cv::Mat roi = canvas(cv::Rect(tt_x, tt_y, tt_w, tt_h));
-    cv::Mat overlay(tt_h, tt_w, CV_8UC3, theme.panel_bg);
-    cv::addWeighted(overlay, static_cast<double>(opacity),
-                    roi, 1.0 - static_cast<double>(opacity), 0, roi);
-    cv::rectangle(canvas, {tt_x, tt_y, tt_w, tt_h}, theme.surface2, 1);
+    adsb_draw::fill_px(list, tt_x, tt_y, tt_x + tt_w - 1, tt_y + tt_h - 1,
+                       adsb_draw::rgb(theme.panel_bg, opacity));
+    adsb_draw::stroke_px(list, tt_x, tt_y, tt_x + tt_w - 1, tt_y + tt_h - 1,
+                         adsb_draw::rgb(theme.surface2), 1);
 
     // left accent — red for restricted/military, blue-gray for controlled,
     // matches the on-map outline color for that class.
     cv::Scalar accent = (a.klass == AirspaceFeature::Class::Restricted)
         ? cv::Scalar(200, 60, 60)
         : cv::Scalar(100, 160, 240);
-    cv::rectangle(canvas, {tt_x, tt_y, 3, tt_h}, accent, cv::FILLED);
+    adsb_draw::fill_px(list, tt_x, tt_y, tt_x + 2, tt_y + tt_h - 1, adsb_draw::rgb(accent));
 
-    adsb_tooltip::PanelCtx ctx{canvas, tt_x, tt_w, tt_y + adsb_tooltip::TT_PAD,
+    adsb_tooltip::PanelCtx ctx{list, font, tt_x, tt_w, tt_y + adsb_tooltip::TT_PAD,
                                fs, line_h, theme};
 
     // Header: name (big) on the left, type tag on the right.
@@ -104,15 +103,14 @@ inline void render_airspace_tooltip(
         std::string left = has_name ? a.name : std::string{"<unnamed airspace>"};
         // Truncate at 40 chars — long FIR / sector names can be unbounded
         if (left.size() > 40) left = left.substr(0, 37) + "...";
-        spc::ui::draw_text_vcenter(canvas,
-            tt_x + adsb_tooltip::TT_PAD, ctx.cy, line_h_big,
-            left.c_str(), theme.text, fs_big);
+        adsb_draw::text_vcenter(list, tt_x + adsb_tooltip::TT_PAD, ctx.cy, line_h_big, left,
+                                adsb_draw::style(font, fs_big, theme.text, true));
 
         if (has_type) {
-            auto tsz = spc::ui::measure_text(a.type_label.c_str(), fs);
-            spc::ui::draw_text_vcenter(canvas,
-                tt_x + tt_w - adsb_tooltip::TT_PAD - tsz.width,
-                ctx.cy, line_h_big, a.type_label.c_str(), accent, fs);
+            const auto type_st = adsb_draw::style(font, fs, accent, true);
+            adsb_draw::text_vcenter(list,
+                tt_x + tt_w - adsb_tooltip::TT_PAD - adsb_draw::text_width(a.type_label, type_st),
+                ctx.cy, line_h_big, a.type_label, type_st);
         }
         ctx.cy += line_h_big;
     }
