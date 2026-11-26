@@ -6,9 +6,8 @@
 // lands relative to the waypoint marker.
 
 #include "adsb_display_state.h"
+#include "draw_helpers.h"
 #include <spc_ui_theme.h>
-
-#include <opencv2/imgproc.hpp>
 
 #include <algorithm>
 #include <cstdio>
@@ -55,32 +54,27 @@ inline bool contains(const cv::Rect& r, float px, float py)
         && px < r.x + r.width && py < r.y + r.height;
 }
 
-// Draws a dimmed full-canvas overlay first to convey "modal", then the popup
-// on top with two buttons. The Delete button is colored red so it visually
-// flags the destructive action.
-inline void render(cv::Mat& canvas, float anchor_x, float anchor_y,
-                   const char* wp_name)
+inline void render(adsb_draw::DrawList& list, int32_t font, int canvas_w, int canvas_h,
+                   float anchor_x, float anchor_y, const char* wp_name)
 {
     static const spc::ui::Theme theme;
 
-    // Dim the whole canvas — signals the modal owns the input.
-    cv::Mat dim_overlay(canvas.rows, canvas.cols, CV_8UC3, cv::Scalar(0, 0, 0));
-    cv::addWeighted(dim_overlay, 0.45, canvas, 0.55, 0, canvas);
+    adsb_draw::fill_px(list, 0, 0, canvas_w - 1, canvas_h - 1, adsb_draw::rgb({0, 0, 0}, 0.45));
 
-    auto geo = compute_geometry(anchor_x, anchor_y, canvas.cols, canvas.rows);
+    auto geo = compute_geometry(anchor_x, anchor_y, canvas_w, canvas_h);
 
-    // Modal background
-    cv::Mat roi = canvas(geo.modal);
-    cv::Mat overlay(geo.modal.height, geo.modal.width, CV_8UC3, theme.panel_bg);
-    cv::addWeighted(overlay, 0.96, roi, 0.04, 0, roi);
-    cv::rectangle(canvas, geo.modal, theme.surface2, 1);
+    const auto& m = geo.modal;
+    adsb_draw::fill_px(list, m.x, m.y, m.x + m.width - 1, m.y + m.height - 1,
+                       adsb_draw::rgb(theme.panel_bg, 0.96));
+    adsb_draw::stroke_px(list, m.x, m.y, m.x + m.width - 1, m.y + m.height - 1,
+                         adsb_draw::rgb(theme.surface2), 1);
 
     // Title + subtitle (waypoint name)
     int line_h = 18;
     int tx = geo.modal.x + 12;
     int ty = geo.modal.y + 10;
-    spc::ui::draw_text_vcenter(canvas, tx, ty, line_h,
-                               "Delete waypoint?", theme.text, 0.42);
+    adsb_draw::text_vcenter(list, tx, ty, line_h, "Delete waypoint?",
+                            adsb_draw::style(font, 0.42, theme.text, true));
 
     char subtitle[SPC_LIST_CELL_STRING_MAX + 8];
     if (wp_name && wp_name[0] != '\0') {
@@ -88,17 +82,17 @@ inline void render(cv::Mat& canvas, float anchor_x, float anchor_y,
     } else {
         std::snprintf(subtitle, sizeof(subtitle), "(unnamed)");
     }
-    spc::ui::draw_text_vcenter(canvas, tx, ty + line_h, line_h,
-                               subtitle, theme.subtext, 0.36);
+    adsb_draw::text_vcenter(list, tx, ty + line_h, line_h, subtitle,
+                            adsb_draw::style(font, 0.36, theme.subtext, true));
 
     auto draw_button = [&](const cv::Rect& r, const char* label,
                            const cv::Scalar& bg, const cv::Scalar& fg) {
-        cv::rectangle(canvas, r, bg, cv::FILLED);
-        cv::rectangle(canvas, r, theme.surface2, 1);
-        auto sz = spc::ui::measure_text(label, 0.42);
-        spc::ui::draw_text_vcenter(canvas,
-            r.x + (r.width - sz.width) / 2,
-            r.y, r.height, label, fg, 0.42);
+        adsb_draw::fill_px(list, r.x, r.y, r.x + r.width - 1, r.y + r.height - 1, adsb_draw::rgb(bg));
+        adsb_draw::stroke_px(list, r.x, r.y, r.x + r.width - 1, r.y + r.height - 1,
+                             adsb_draw::rgb(theme.surface2), 1);
+        const auto st = adsb_draw::style(font, 0.42, fg, true);
+        adsb_draw::text_vcenter(list, r.x + (r.width - adsb_draw::text_width(label, st)) / 2,
+                                r.y, r.height, label, st);
     };
 
     draw_button(geo.cancel_btn, "Cancel", theme.surface1, theme.text);

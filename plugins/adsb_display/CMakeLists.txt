@@ -13,8 +13,12 @@ spc_add_plugin(adsb_display SOURCES
     openaip_loader.cpp
     view_math.cpp
 )
-target_link_libraries(adsb_display PRIVATE ${OpenCV_LIBS} SpeculorSDK::spclib_http nlohmann_json::nlohmann_json)
+target_link_libraries(adsb_display PRIVATE SpeculorSDK::speculor_draw ${OpenCV_LIBS} SpeculorSDK::spclib_http
+                      nlohmann_json::nlohmann_json)
 target_include_directories(adsb_display SYSTEM PRIVATE ${OpenCV_INCLUDE_DIRS})
+if(SPC_VULKAN_FOUND)
+    spc_enable_gpu(adsb_display)
+endif()
 
 # Copy the fetched OpenAIP data files next to the plugin DLL so the plugin
 # can find them at runtime via its own module path. Without this the paths

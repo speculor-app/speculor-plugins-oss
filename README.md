@@ -21,7 +21,7 @@ the public Speculor SDK exactly like any other plugin.
 | **rtl_sdr** | — → signal | RTL-SDR I/Q source (data-source plugin — captured by session recording, driven by reinjection replay) | Apache-2.0 plugin code; links **librtlsdr (LGPL-2.1+)** at runtime |
 | **nesdr** | — → signal | NooElec NESDR I/Q source: same ports and parameters as `rtl_sdr`, but gates each hardware control on a per-model capability table, so a board without a Q-branch, a bias tee or an E4000 never gets told it has one. **Experimental — never run against a NESDR;** the table is built from published specs, use `rtl_sdr` for a tested path | Apache-2.0 plugin code; links **librtlsdr (LGPL-2.1+)** at runtime |
 | **kraken_sdr** | — → 5× signal | KrakenSDR 5-channel coherent RTL-SDR array source (data-source plugin; reuses the `rtl_sdr` device layer) | Apache-2.0 plugin code; links **librtlsdr (LGPL-2.1+)** at runtime |
-| **adsb_display** | table → frame | Interactive ADS-B map: slippy-map tiles, aircraft markers with type-specific silhouettes, airspace and airport layers, trails, tooltips and an aircraft list | **GPL-3.0** — the only copyleft plugin here; marker artwork derives from [tar1090](https://github.com/wiedehopf/tar1090) |
+| **adsb_display** | table → frame | Interactive ADS-B map (CPU + Vulkan GPU): slippy-map tiles, aircraft markers with type-specific silhouettes, airspace and airport layers, trails, tooltips and an aircraft list | **GPL-3.0** — the only copyleft plugin here; marker artwork derives from [tar1090](https://github.com/wiedehopf/tar1090) |
 
 > **Linux: `rtl_sdr`, `nesdr` and `kraken_sdr` need librtlsdr installed separately.** It
 > is `dlopen`ed at runtime rather than linked, so it is in no Speculor archive

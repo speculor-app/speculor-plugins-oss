@@ -1,17 +1,16 @@
 #include "airports_layer.h"
 #include "adsb_display_state.h"
 #include "color_palette.h"
+#include "draw_helpers.h"
 #include "geo_helpers.h"
-
-#include <opencv2/imgproc.hpp>
-
-#include <spc_ui_text.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <string>
 #include <vector>
+
+using namespace adsb_draw;
 
 namespace {
 
@@ -85,37 +84,38 @@ bool visible_at(AirportFeature::Size size, int32_t min_type, double zoom)
 // Military keeps the red accent ring (slightly dimmed so it's not alarming
 // on busy airspace) and the selection accent stays bright yellow so
 // origin/dest / clicked airports still pop.
-void draw_airport(cv::Mat& canvas, cv::Point2d center_px,
+void draw_airport(DrawList& list, cv::Point2d center_px,
                   const AirportFeature& a, int32_t map_style,
                   const cv::Scalar& halo, bool accented)
 {
     int r = radius_for(a.size);
     if (accented) r += 2;
-    cv::Point c(static_cast<int>(center_px.x), static_cast<int>(center_px.y));
+    const Point c = px(static_cast<int>(center_px.x), static_cast<int>(center_px.y));
+    const auto rf = static_cast<float>(r);
 
     cv::Scalar marker = is_dark_map(map_style)
         ? cv::Scalar(140, 160, 180)      // muted steel-blue on dark maps
         : cv::Scalar( 90, 100, 110);     // muted charcoal on light maps
 
     // halo underneath for visibility on busy tile backgrounds
-    cv::circle(canvas, c, r + 1, halo, cv::FILLED, cv::LINE_AA);
+    list.fill_circle(c, rf + 1.5f, rgb(halo));
 
     // hollow ring — main marker
-    cv::circle(canvas, c, r, marker, 1, cv::LINE_AA);
+    list.stroke_circle(c, rf, 1, rgb(marker));
 
     // center dot — size-tier cue
     if (a.size == AirportFeature::Size::Large) {
-        cv::circle(canvas, c, 2, marker, cv::FILLED, cv::LINE_AA);
+        list.fill_circle(c, 2.5f, rgb(marker));
     } else if (a.size == AirportFeature::Size::Medium) {
-        cv::circle(canvas, c, 1, marker, cv::FILLED, cv::LINE_AA);
+        list.fill_circle(c, 1.5f, rgb(marker));
     }
 
     if (a.military) {
-        cv::circle(canvas, c, r + 3, cv::Scalar(200, 70, 70), 1, cv::LINE_AA);
+        list.stroke_circle(c, rf + 3, 1, Color{200, 70, 70});
     }
 
     if (accented) {
-        cv::circle(canvas, c, r + 5, cv::Scalar(255, 200, 40), 2, cv::LINE_AA);
+        list.stroke_circle(c, rf + 5, 2, Color{255, 200, 40});
     }
 }
 
@@ -129,7 +129,7 @@ const AirportFeature* lookup_airport(const MapDisplayState* s,
 
 } // namespace
 
-void render_airports_layer(MapDisplayState* s,
+void render_airports_layer(MapDisplayState* s, DrawList& list,
                            double zoom, double origin_tx, double origin_ty,
                            int map_w, int h)
 {
@@ -173,10 +173,8 @@ void render_airports_layer(MapDisplayState* s,
     }
 
     int32_t info_airport_idx = s->info_panel_airport_idx.load(std::memory_order_relaxed);
-    double fs = 0.32;
-    int label_baseline = 0;
-    auto label_probe = cv::getTextSize("A", cv::FONT_HERSHEY_SIMPLEX, fs, 1, &label_baseline);
-    int label_h = label_probe.height;
+    const TextStyle label_style = style(s->cur.font, 0.32, outline);
+    const int label_h = static_cast<int>(std::lround(text_height(label_style)));
 
     for (size_t i = 0; i < s->reference.airports.size(); ++i) {
         const auto& a = s->reference.airports[i];
@@ -184,13 +182,13 @@ void render_airports_layer(MapDisplayState* s,
         if (a.lat < view_min_lat || a.lat > view_max_lat) continue;
         if (a.lon < view_min_lon || a.lon > view_max_lon) continue;
 
-        auto px = geo_to_pixel(a.lat, a.lon, zoom, origin_tx, origin_ty);
+        auto pos = geo_to_pixel(a.lat, a.lon, zoom, origin_tx, origin_ty);
         bool accented = (origin_ap == &a) || (dest_ap == &a)
                         || info_airport_idx == static_cast<int32_t>(i);
-        draw_airport(s->canvas, px, a, s->cur.map_style, halo, accented);
+        draw_airport(list, pos, a, s->cur.map_style, halo, accented);
 
-        int ix = static_cast<int>(px.x);
-        int iy = static_cast<int>(px.y);
+        int ix = static_cast<int>(pos.x);
+        int iy = static_cast<int>(pos.y);
 
         // record for hit-testing regardless of whether a label renders
         build_pos.push_back({
@@ -205,7 +203,7 @@ void render_airports_layer(MapDisplayState* s,
             if (!text.empty()) {
                 int lx = ix + radius_for(a.size) + 5;
                 int ly = iy + label_h / 2;
-                spc::ui::draw_text_outlined(s->canvas, text, {lx, ly}, fs, outline, halo);
+                text_outlined(list, lx, ly, text, label_style, halo);
             }
         }
     }

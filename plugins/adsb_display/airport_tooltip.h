@@ -7,6 +7,8 @@
 #include "adsb_display_state.h"
 #include "unit_format.h"
 #include "aircraft_tooltip.h"  // reuse PanelCtx, TT_PAD, TT_OFFSET
+#include "country_flags.h"
+#include "draw_helpers.h"
 
 #include <spc_ui_theme.h>
 
@@ -30,11 +32,11 @@ inline const char* size_label(AirportFeature::Size s)
 }
 
 inline void render_airport_tooltip(
-    cv::Mat& canvas,
+    adsb_draw::DrawList& list, int32_t font, int canvas_w, int canvas_h,
     int32_t airport_idx,
     float anchor_x, float anchor_y,
     const std::vector<AirportFeature>& airports,
-    CountryFlagCache& flags,
+    const CountryFlagCache& flags,
     float font_size,
     float opacity = 0.92f,
     int32_t unit_system = 0)
@@ -74,28 +76,27 @@ inline void render_airport_tooltip(
     // ── position, flip near edges ─────────────────────────────────────
     int tt_x = static_cast<int>(anchor_x) + adsb_tooltip::TT_OFFSET;
     int tt_y = static_cast<int>(anchor_y) + adsb_tooltip::TT_OFFSET;
-    if (tt_x + tt_w > canvas.cols - 5)
+    if (tt_x + tt_w > canvas_w - 5)
         tt_x = static_cast<int>(anchor_x) - adsb_tooltip::TT_OFFSET - tt_w;
-    if (tt_y + tt_h > canvas.rows - 5)
+    if (tt_y + tt_h > canvas_h - 5)
         tt_y = static_cast<int>(anchor_y) - adsb_tooltip::TT_OFFSET - tt_h;
-    tt_x = std::clamp(tt_x, 2, std::max(2, canvas.cols - tt_w - 2));
-    tt_y = std::clamp(tt_y, 2, std::max(2, canvas.rows - tt_h - 2));
+    tt_x = std::clamp(tt_x, 2, std::max(2, canvas_w - tt_w - 2));
+    tt_y = std::clamp(tt_y, 2, std::max(2, canvas_h - tt_h - 2));
 
     // ── background ────────────────────────────────────────────────────
-    cv::Mat roi = canvas(cv::Rect(tt_x, tt_y, tt_w, tt_h));
-    cv::Mat overlay(tt_h, tt_w, CV_8UC3, theme.panel_bg);
-    cv::addWeighted(overlay, static_cast<double>(opacity),
-                    roi, 1.0 - static_cast<double>(opacity), 0, roi);
-    cv::rectangle(canvas, {tt_x, tt_y, tt_w, tt_h}, theme.surface2, 1);
+    adsb_draw::fill_px(list, tt_x, tt_y, tt_x + tt_w - 1, tt_y + tt_h - 1,
+                       adsb_draw::rgb(theme.panel_bg, opacity));
+    adsb_draw::stroke_px(list, tt_x, tt_y, tt_x + tt_w - 1, tt_y + tt_h - 1,
+                         adsb_draw::rgb(theme.surface2), 1);
 
     // left accent — red for military, yellow otherwise (matches the map
     // marker convention so the panel visually links back to the icon)
     cv::Scalar accent = a.military ? cv::Scalar(230, 60, 60)
                                    : cv::Scalar(255, 200, 40);
-    cv::rectangle(canvas, {tt_x, tt_y, 3, tt_h}, accent, cv::FILLED);
+    adsb_draw::fill_px(list, tt_x, tt_y, tt_x + 2, tt_y + tt_h - 1, adsb_draw::rgb(accent));
 
     // ── content ───────────────────────────────────────────────────────
-    adsb_tooltip::PanelCtx ctx{canvas, tt_x, tt_w, tt_y + adsb_tooltip::TT_PAD,
+    adsb_tooltip::PanelCtx ctx{list, font, tt_x, tt_w, tt_y + adsb_tooltip::TT_PAD,
                                fs, line_h, theme};
 
     // Header: IATA (or fallback) big on the left; on the right, when present:
@@ -109,9 +110,8 @@ inline void render_airport_tooltip(
         else if (has_name) left = a.name.substr(0, 10);
         else               left = "---";
 
-        spc::ui::draw_text_vcenter(canvas,
-            tt_x + adsb_tooltip::TT_PAD, ctx.cy, line_h_big,
-            left.c_str(), theme.text, fs_big);
+        adsb_draw::text_vcenter(list, tt_x + adsb_tooltip::TT_PAD, ctx.cy, line_h_big, left,
+                                adsb_draw::style(font, fs_big, theme.text, true));
 
         int rx = tt_x + tt_w - adsb_tooltip::TT_PAD;
 
@@ -127,30 +127,22 @@ inline void render_airport_tooltip(
             const char* cname = country_name_from_iso(cc_upper);
             const char* cc_display = cname ? cname : cc_upper;
 
-            auto cc_sz = spc::ui::measure_text(cc_display, fs);
-            rx -= cc_sz.width;
-            spc::ui::draw_text_vcenter(canvas,
-                rx, ctx.cy, line_h_big, cc_display, theme.subtext, fs);
+            const auto cc_st = adsb_draw::style(font, fs, theme.subtext, true);
+            rx -= adsb_tooltip::text_width_px(cc_display, cc_st);
+            adsb_draw::text_vcenter(list, rx, ctx.cy, line_h_big, cc_display, cc_st);
 
-            const auto& flag_img = flags.get(cc_upper);
-            if (!flag_img.empty()) {
-                rx -= flag_img.cols + 3;
-                int fy = ctx.cy + (line_h_big - flag_img.rows) / 2;
-                if (rx >= tt_x && fy >= tt_y &&
-                    rx + flag_img.cols <= canvas.cols &&
-                    fy + flag_img.rows <= canvas.rows) {
-                    flag_img.copyTo(canvas(cv::Rect(rx, fy, flag_img.cols, flag_img.rows)));
-                }
-            }
+            rx -= CountryFlagCache::FLAG_W + 3;
+            int fy = ctx.cy + (line_h_big - CountryFlagCache::FLAG_H) / 2;
+            if (rx >= tt_x && fy >= tt_y)
+                draw_flag(list, font, flags, cc_upper, rx, fy);
             rx -= 6;
         }
 
         // ICAO (only if IATA already filled the big left-side token)
         if (has_icao && has_iata) {
-            auto ic_sz = spc::ui::measure_text(a.ident.c_str(), fs);
-            rx -= ic_sz.width;
-            spc::ui::draw_text_vcenter(canvas,
-                rx, ctx.cy, line_h_big, a.ident.c_str(), theme.subtext, fs);
+            const auto ic_st = adsb_draw::style(font, fs, theme.subtext, true);
+            rx -= adsb_tooltip::text_width_px(a.ident, ic_st);
+            adsb_draw::text_vcenter(list, rx, ctx.cy, line_h_big, a.ident, ic_st);
         }
 
         ctx.cy += line_h_big;
@@ -158,9 +150,8 @@ inline void render_airport_tooltip(
 
     if (has_name) {
         // full name dimmed below the header
-        spc::ui::draw_text_vcenter(canvas,
-            tt_x + adsb_tooltip::TT_PAD, ctx.cy, line_h,
-            a.name.c_str(), theme.subtext, fs);
+        adsb_draw::text_vcenter(list, tt_x + adsb_tooltip::TT_PAD, ctx.cy, line_h, a.name,
+                                adsb_draw::style(font, fs, theme.subtext, true));
         ctx.cy += line_h;
     }
 
@@ -183,14 +174,13 @@ inline void render_airport_tooltip(
 
     // Size bucket on the left, MIL badge on the right if applicable.
     const char* sz = size_label(a.size);
-    spc::ui::draw_text_vcenter(canvas,
-        tt_x + adsb_tooltip::TT_PAD, ctx.cy, line_h,
-        sz, theme.subtext, fs);
+    adsb_draw::text_vcenter(list, tt_x + adsb_tooltip::TT_PAD, ctx.cy, line_h, sz,
+                            adsb_draw::style(font, fs, theme.subtext, true));
     if (a.military) {
-        auto rsz = spc::ui::measure_text("MILITARY", fs);
-        spc::ui::draw_text_vcenter(canvas,
-            tt_x + tt_w - adsb_tooltip::TT_PAD - rsz.width,
-            ctx.cy, line_h, "MILITARY", cv::Scalar(240, 80, 80), fs);
+        const auto mil_st = adsb_draw::style(font, fs, cv::Scalar(240, 80, 80), true);
+        adsb_draw::text_vcenter(list,
+            tt_x + tt_w - adsb_tooltip::TT_PAD - adsb_draw::text_width("MILITARY", mil_st),
+            ctx.cy, line_h, "MILITARY", mil_st);
     }
     ctx.cy += line_h;
 }

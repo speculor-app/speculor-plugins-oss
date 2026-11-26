@@ -4,6 +4,8 @@
 
 #include "adsb_display_state.h"
 #include "aircraft_tooltip.h"
+#include "country_flags.h"
+#include "draw_helpers.h"
 #include <spc_ui_theme.h>
 
 #include <algorithm>
@@ -113,11 +115,11 @@ inline void sort_aircraft(std::vector<AircraftView>& aircraft,
 // ── rendering ─────────────────────────────────────────────────────────
 
 inline void render_aircraft_list(
-    cv::Mat& canvas,
+    adsb_draw::DrawList& list, int32_t font,
     int panel_x, int panel_y, int panel_w, int panel_h,
     std::vector<AircraftView>& aircraft,
     ListPanelState& state,
-    CountryFlagCache& flags,
+    const CountryFlagCache& flags,
     const std::unordered_map<uint32_t, std::chrono::steady_clock::time_point>& /*first_seen*/,
     std::chrono::steady_clock::time_point /*now*/,
     int32_t unit_system = 0)
@@ -126,13 +128,11 @@ inline void render_aircraft_list(
 
     static const spc::ui::Theme theme;
 
-    // panel background
-    cv::Mat panel_roi = canvas(cv::Rect(panel_x, panel_y, panel_w, panel_h));
-    panel_roi.setTo(theme.panel_bg);
+    adsb_draw::fill_px(list, panel_x, panel_y, panel_x + panel_w - 1, panel_y + panel_h - 1,
+                       adsb_draw::rgb(theme.panel_bg));
 
-    // vertical separator line
-    cv::line(canvas, {panel_x, panel_y}, {panel_x, panel_y + panel_h},
-             theme.surface1, 1);
+    list.line(adsb_draw::px(panel_x, panel_y), adsb_draw::px(panel_x, panel_y + panel_h), 1,
+              adsb_draw::rgb(theme.surface1));
 
     // sort aircraft
     sort_aircraft(aircraft, state);
@@ -150,25 +150,27 @@ inline void render_aircraft_list(
 
     // ── header row ────────────────────────────────────────────────────
     int hdr_y = panel_y;
-    cv::rectangle(canvas, {panel_x, hdr_y, panel_w, HEADER_H},
-                  theme.surface1, cv::FILLED);
+    adsb_draw::fill_px(list, panel_x, hdr_y, panel_x + panel_w - 1, hdr_y + HEADER_H - 1,
+                       adsb_draw::rgb(theme.surface1));
 
     for (int i = 0; i < NUM_COLS; ++i) {
         if (k_columns[i].name[0] == '\0') continue;
         auto col = (state.sort_column == i) ? theme.blue : theme.subtext;
-        spc::ui::draw_text_vcenter(canvas, col_x[i], hdr_y, HEADER_H,
-                                   k_columns[i].name, col, FONT_HDR);
+        adsb_draw::text_vcenter(list, col_x[i], hdr_y, HEADER_H, k_columns[i].name,
+                                adsb_draw::style(font, FONT_HDR, col, true));
 
         // sort indicator arrow
         if (state.sort_column == i) {
             int ax = col_x[i] + static_cast<int>(k_columns[i].width * scale) - 8;
             int ay = hdr_y + HEADER_H / 2;
             if (state.sort_ascending) {
-                cv::Point pts[3] = {{ax, ay + 3}, {ax + 4, ay - 3}, {ax + 8, ay + 3}};
-                cv::fillConvexPoly(canvas, pts, 3, theme.blue);
+                const adsb_draw::Point pts[3] = {adsb_draw::px(ax, ay + 3), adsb_draw::px(ax + 4, ay - 3),
+                                                 adsb_draw::px(ax + 8, ay + 3)};
+                list.fill_polygon(pts, adsb_draw::rgb(theme.blue));
             } else {
-                cv::Point pts[3] = {{ax, ay - 3}, {ax + 4, ay + 3}, {ax + 8, ay - 3}};
-                cv::fillConvexPoly(canvas, pts, 3, theme.blue);
+                const adsb_draw::Point pts[3] = {adsb_draw::px(ax, ay - 3), adsb_draw::px(ax + 4, ay + 3),
+                                                 adsb_draw::px(ax + 8, ay - 3)};
+                list.fill_polygon(pts, adsb_draw::rgb(theme.blue));
             }
         }
     }
@@ -201,19 +203,16 @@ inline void render_aircraft_list(
         else
             row_bg = cv::Scalar(0x2e, 0x28, 0x38);
 
-        cv::rectangle(canvas, {panel_x + 1, ry, panel_w - 1, ROW_H}, row_bg, cv::FILLED);
+        adsb_draw::fill_px(list, panel_x + 1, ry, panel_x + panel_w - 1, ry + ROW_H - 1,
+                           adsb_draw::rgb(row_bg));
 
         auto text_col = (ac.icao == state.selected_icao) ? theme.text : theme.subtext;
 
         // col 0: flag
         if (ac.country_code) {
-            const auto& flag_img = flags.get(ac.country_code);
             int fx = col_x[0];
             int fy = ry + (ROW_H - CountryFlagCache::FLAG_H) / 2;
-            if (fx >= 0 && fy >= 0 &&
-                fx + flag_img.cols <= canvas.cols && fy + flag_img.rows <= canvas.rows) {
-                flag_img.copyTo(canvas(cv::Rect(fx, fy, flag_img.cols, flag_img.rows)));
-            }
+            draw_flag(list, font, flags, ac.country_code, fx, fy);
         }
 
         // col 1: callsign-or-ICAO (top line) + registration (bottom line,
@@ -225,14 +224,14 @@ inline void render_aircraft_list(
                 ? ac.callsign
                 : std::format("{:06X}", ac.icao);
             int cs_y = ry + 2;
-            spc::ui::draw_text_vcenter(canvas, col_x[1], cs_y, ROW_H / 2,
-                                       top.c_str(), text_col, FONT);
+            adsb_draw::text_vcenter(list, col_x[1], cs_y, ROW_H / 2, top,
+                                    adsb_draw::style(font, FONT, text_col, true));
 
             if (!ac.registration.empty()) {
                 auto reg_col = theme.subtext;
                 int reg_y = ry + ROW_H / 2 - 1;
-                spc::ui::draw_text_vcenter(canvas, col_x[1], reg_y, ROW_H / 2,
-                                           ac.registration.c_str(), reg_col, FONT_SM);
+                adsb_draw::text_vcenter(list, col_x[1], reg_y, ROW_H / 2, ac.registration,
+                                        adsb_draw::style(font, FONT_SM, reg_col, true));
             }
         }
 
@@ -244,12 +243,11 @@ inline void render_aircraft_list(
                 int bot_y = ry + ROW_H / 2 - 1;
                 auto orig = !ac.origin_iata.empty() ? ac.origin_iata : ac.origin_icao;
                 auto dest = !ac.dest_iata.empty() ? ac.dest_iata : ac.dest_icao;
+                const auto route_st = adsb_draw::style(font, FONT_SM, route_col, true);
                 if (!orig.empty())
-                    spc::ui::draw_text_vcenter(canvas, col_x[2], top_y, ROW_H / 2,
-                                               orig.c_str(), route_col, FONT_SM);
+                    adsb_draw::text_vcenter(list, col_x[2], top_y, ROW_H / 2, orig, route_st);
                 if (!dest.empty())
-                    spc::ui::draw_text_vcenter(canvas, col_x[2], bot_y, ROW_H / 2,
-                                               dest.c_str(), route_col, FONT_SM);
+                    adsb_draw::text_vcenter(list, col_x[2], bot_y, ROW_H / 2, dest, route_st);
             }
         }
 
@@ -259,7 +257,7 @@ inline void render_aircraft_list(
             auto sc = status_color(st);
             int cx = col_x[3] + 7;
             int cy = ry + ROW_H / 2;
-            cv::circle(canvas, {cx, cy}, 4, sc, cv::FILLED, cv::LINE_AA);
+            list.fill_circle(adsb_draw::px(cx, cy), 4 + 0.5f, adsb_draw::rgb(sc));
         }
 
         // col 4: altitude
@@ -271,8 +269,8 @@ inline void render_aircraft_list(
                 alt_str = format_altitude_value(ac.alt, unit_system);
             else
                 alt_str = "---";
-            spc::ui::draw_text_vcenter(canvas, col_x[4], ry, ROW_H,
-                                       alt_str.c_str(), text_col, FONT);
+            adsb_draw::text_vcenter(list, col_x[4], ry, ROW_H, alt_str,
+                                    adsb_draw::style(font, FONT, text_col, true));
         }
 
         // col 5: speed
@@ -282,8 +280,8 @@ inline void render_aircraft_list(
                 spd_str = format_speed_value(ac.gs, unit_system);
             else
                 spd_str = "---";
-            spc::ui::draw_text_vcenter(canvas, col_x[5], ry, ROW_H,
-                                       spd_str.c_str(), text_col, FONT);
+            adsb_draw::text_vcenter(list, col_x[5], ry, ROW_H, spd_str,
+                                    adsb_draw::style(font, FONT, text_col, true));
         }
 
         // col 6: signal strength bars
@@ -291,7 +289,7 @@ inline void render_aircraft_list(
             int level = adsb_tooltip::rssi_level(ac.rssi);
             auto color = adsb_tooltip::rssi_color(level);
             int bar_h = ROW_H - 10;
-            adsb_tooltip::draw_signal_bars(canvas, col_x[6] + 2, ry + 5, bar_h, level, color);
+            adsb_tooltip::draw_signal_bars(list, col_x[6] + 2, ry + 5, bar_h, level, color);
         }
     }
 
@@ -305,17 +303,17 @@ inline void render_aircraft_list(
             static_cast<float>(state.scroll_offset) / max_scroll : 0.0f;
         int thumb_y = track_y + static_cast<int>((track_h - thumb_h) * scroll_frac);
         int bar_x = panel_x + panel_w - 4;
-        cv::rectangle(canvas, {bar_x, thumb_y, 3, thumb_h},
-                      theme.surface2, cv::FILLED);
+        adsb_draw::fill_px(list, bar_x, thumb_y, bar_x + 2, thumb_y + thumb_h - 1,
+                           adsb_draw::rgb(theme.surface2));
     }
 
     // ── bottom status bar ─────────────────────────────────────────────
     int bar_y = panel_y + panel_h - STATUS_BAR;
-    cv::rectangle(canvas, {panel_x, bar_y, panel_w, STATUS_BAR},
-                  theme.surface1, cv::FILLED);
+    adsb_draw::fill_px(list, panel_x, bar_y, panel_x + panel_w - 1, bar_y + STATUS_BAR - 1,
+                       adsb_draw::rgb(theme.surface1));
     auto count_str = std::format(" {} aircraft", total_rows);
-    spc::ui::draw_text_vcenter(canvas, panel_x + PAD_X, bar_y, STATUS_BAR,
-                               count_str.c_str(), theme.subtext, FONT);
+    adsb_draw::text_vcenter(list, panel_x + PAD_X, bar_y, STATUS_BAR, count_str,
+                            adsb_draw::style(font, FONT, theme.subtext, true));
 }
 
 // ── event handling ────────────────────────────────────────────────────

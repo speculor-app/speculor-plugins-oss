@@ -47,6 +47,9 @@ plugins/
                    #   published specs, and the tests only prove the plugin gates what its own table claims.
                    #   The assumptions are enumerated in its README; check them before trusting a profile
   kraken_sdr/      # KrakenSDR 5-channel coherent RTL-SDR array source (5 signal ports); compiles rtl_sdr's device layer; links librtlsdr LGPL-2.1+ at runtime
+  adsb_display/    # ADS-B map (CPU + Vulkan GPU; GPL-3.0). Draws one spc::draw::DrawList (needs SDK >= 0.60.0) with
+                   #   CpuDrawer in process() or GpuDrawer in record_gpu(); the static layers (tiles, airspace,
+                   #   airports, rings) are drawn on the CPU only when the view changes, and reach the GPU as one Image
   cmake/           # FindRtlSdr.cmake (header locator) + RtlSdr.cmake (downloader)
 ```
 
@@ -85,6 +88,7 @@ Four tiers, each registered per plugin so a failure names the plugin:
 | `nohardware.<plugin>` | `sdr_nohardware_runner.cpp` | SDR sources — no-device paths |
 | `models.<plugin>` | `nesdr_models_runner.cpp` | nesdr's per-model capability gating |
 | `display.<plugin>` | `adsb_display_runner.cpp` | waypoint round-trip, hostile inputs |
+| `display.<plugin>_parity` | `adsb_display_parity_runner.cpp`, `display_gpu_harness.cpp` | the same map from `process()` and `record_gpu()`; SKIPs without a Vulkan device |
 
 Conformance is the floor, not the goal: it proves the plugin loads and answers the ABI honestly, never that it works. Pick the tier that matches the plugin's contract — and where no hardware exists in CI, the no-device paths are still worth asserting, since the librtlsdr heap corruption and the unbounded-stop bugs both lived there.
 

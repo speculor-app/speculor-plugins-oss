@@ -5,6 +5,8 @@
 // the viewport before projection — the full worldwide dataset can be
 // tens of thousands of polygons, but any given frame only touches a few.
 
+#include <draw/draw_list.h>
+
 struct MapDisplayState;
 
 // airspace_classes enum values (match the param descriptor)
@@ -15,6 +17,6 @@ enum {
     AIRSPACE_CLASSES_ALL        = 3,
 };
 
-void render_airspace_layer(MapDisplayState* s,
+void render_airspace_layer(MapDisplayState* s, spc::draw::DrawList& list,
                            double zoom, double origin_tx, double origin_ty,
                            int map_w, int h);

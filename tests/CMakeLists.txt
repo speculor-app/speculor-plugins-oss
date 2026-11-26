@@ -131,6 +131,21 @@ if(TARGET adsb_display)
     message(STATUS "[tests] display registered for: adsb_display")
 endif()
 
+# ── adsb_display draws the same map on the GPU as on the CPU ──────────
+# The same aircraft and receiver position to process() and record_gpu(): the
+# frames must agree. SKIPs (exit 0) without a Vulkan device.
+if(TARGET adsb_display AND SPC_VULKAN_FOUND)
+    spc_add_plugin_test(spc_adsb_display_parity_tests
+        SOURCES adsb_display_parity_runner.cpp display_gpu_harness.cpp
+        PLUGINS adsb_display
+    )
+    spc_enable_gpu(spc_adsb_display_parity_tests)
+    add_test(NAME display.adsb_display_parity
+             COMMAND spc_adsb_display_parity_tests $<TARGET_FILE:adsb_display>)
+    set_tests_properties(display.adsb_display_parity PROPERTIES TIMEOUT 180)
+    message(STATUS "[tests] display registered for: adsb_display_parity")
+endif()
+
 # On Windows a test only finds the libraries the plugins need (the SDK's, the
 # app's, the vendor DLLs beside a bundle) when their folders are on PATH: the
 # engine adds them with AddDllDirectory, a test calling LoadLibrary cannot, and

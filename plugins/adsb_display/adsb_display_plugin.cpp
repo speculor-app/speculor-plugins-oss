@@ -18,7 +18,11 @@
 
 #include <speculor/table_helpers.h>
 #include <spc_clock.h>
-#include <spc_ui_text.h>
+#ifdef SPC_HAS_VULKAN
+#include <gpu/gpu_host.h>
+#endif
+
+#include <cstring>
 
 SPC_PLUGIN_CAST(MapDisplayState)
 SPC_PLUGIN_HOST_SERVICES(MapDisplayState, host)
@@ -30,10 +34,11 @@ using Params = MapDisplayState::Params;
 
 SPC_PLUGIN_DESCRIPTOR(
     spc::DescriptorBuilder("adsb_display", "ADS-B Display", "ADS-B/Visualization")
-        .author("Speculor").version("0.1.0")
+        .author("Speculor").version("0.2.0")
         .help("Renders ADS-B aircraft positions on an OpenStreetMap tile map")
         .maturity(SPC_MATURITY_STABLE)
         .tags({"ads-b", "tracking"})
+        SPC_IF_VULKAN(.gpu_compute())
         // field order is mirrored by AircraftField / GpsField in input_parser.cpp
         .input_table("aircraft_in", "Aircraft", {
             {"icao_addr",       SPC_FIELD_UINT32},
@@ -114,6 +119,8 @@ SPC_PLUGIN_DESCRIPTOR(
             .param_help("Aircraft icon size multiplier")
         .float_param("font_size", "Font Size", 0.1f, 2.0f, 0.35f, 0.05f, "Display")
             .param_help("Aircraft label font size multiplier")
+        .enum_param("font", "Font", {"Inter", "Noto Sans", "Roboto"}, 0, "Display")
+            .param_help("Typeface of every label, panel and tooltip")
         .enum_param("unit_system", "Units", {"Imperial", "Metric"}, 1, "Display")
             .param_help("Unit system: Imperial (ft, kts, fpm) or Metric (m, km/h, m/min)")
         .bool_param("show_labels", "Show Labels", true, "Display")
@@ -302,6 +309,7 @@ static int set_parameter(SpcPluginInstance* inst, const char* name,
             || spc::try_set_string(name, value, "custom_server", p.custom_server)
             || spc::try_set_float(name, value, "icon_scale", p.icon_scale)
             || spc::try_set_float(name, value, "font_size", p.font_size)
+            || spc::try_set_enum(name, value, "font", p.font)
             || spc::try_set_enum(name, value, "unit_system", p.unit_system)
             || spc::try_set_bool(name, value, "show_labels", p.show_labels)
             || spc::try_set_bool(name, value, "show_trails", p.show_trails)
@@ -498,8 +506,15 @@ static int start(SpcPluginInstance* inst)
     s->photo_cache.clear();
     s->enrichment_cache.clear();
     s->max_range_km = 0.0;
+    s->bg_key_valid = false;
+    s->bg_image_stale = true;
     // clear any pending param reconfiguration — start applied current params
     s->params_dirty.store(false, std::memory_order_release);
+#ifdef SPC_HAS_VULKAN
+    s->vk = spc::gpu::context_from_host(s->host.svc);
+    s->gpu_ready = s->vk && s->gpu_drawer.init(*s->vk);
+    if (!s->gpu_ready) s->vk.reset();
+#endif
 
     // Loaded on a thread: a first-run parse takes tens of seconds, which start()
     // must not hold the engine for. Readers gate on `reference_loaded` (acquire).
@@ -556,6 +571,15 @@ static int stop(SpcPluginInstance* inst)
     s->first_seen.clear();
     s->screen_pos[0].clear();
     s->screen_pos[1].clear();
+    s->list.clear();
+    s->static_list.clear();
+#ifdef SPC_HAS_VULKAN
+    if (s->vk) {
+        s->gpu_drawer.destroy(*s->vk);
+        s->vk.reset();
+    }
+    s->gpu_ready = false;
+#endif
     SPC_LOG_INFO(&s->host.cached_log, "adsb display stopped (%llu frames)",
                  static_cast<unsigned long long>(s->sequence));
     return 0;
@@ -687,6 +711,7 @@ static BackgroundKey compute_bg_key(MapDisplayState* s,
     k.show_max_range     = cur.show_max_range;
 
     k.map_style          = cur.map_style;
+    k.font               = cur.font;
     k.airspace_classes   = cur.airspace_classes;
     k.airspace_altitude_ft = cur.airspace_altitude_ft;
     k.airspace_opacity   = cur.airspace_opacity;
@@ -710,14 +735,13 @@ static BackgroundKey compute_bg_key(MapDisplayState* s,
     return k;
 }
 
-static int process(SpcPluginInstance* inst, SpcStep* step)
+// What the frame shows, into s->list. The map area's static layers are in
+// s->bg_rgb, drawn again only when their key changes; the GPU path draws them
+// from s->bg_image as the list's first command, the CPU path copies them in.
+static void build_frame(MapDisplayState* s, const SpcStep* step, bool for_gpu)
 {
     const SpcData* inputs = step->inputs;
     const uint32_t input_count = step->input_count;
-    SpcData* outputs = step->outputs;
-    const uint32_t output_count = step->output_count;
-    auto* s = state(inst);
-    if (output_count < 1) return -1;
 
     // ── per-frame parameter snapshot (H6) ──────────────────────────────
     // exchange BEFORE snapshot so an edit landing in the window stays flagged
@@ -828,56 +852,52 @@ static int process(SpcPluginInstance* inst, SpcStep* step)
         }
     }
 
-    // create canvas (full width including panel area). Reuse the existing
-    // Mat across frames — only allocate when missing or when the size /
-    // type changed (parameter resize). Saves a ~2.8 MB allocation +
-    // initialization every process() call.
-    if (s->canvas.empty() || s->canvas.rows != h || s->canvas.cols != w ||
-        s->canvas.type() != CV_8UC3) {
-        s->canvas = cv::Mat(h, w, CV_8UC3, cv::Scalar(200, 200, 200));
-    } else {
-        s->canvas.setTo(cv::Scalar(200, 200, 200));
-    }
-
-    // ── sticky background cache ────────────────────────────────────────
+    // ── sticky background ──────────────────────────────────────────────
     // The static layers (tiles + airspace + airports + range rings + max
     // range) depend only on view + style + selection state — none of which
-    // change frame-to-frame on a stable view. Cache the rendered map_rect
-    // and reuse it whenever the BackgroundKey is unchanged. On a steady
-    // view this turns ~22 ms of per-frame OpenCV work into a single
-    // ~2.8 MB memcpy.
-    cv::Rect map_rect(0, 0, map_w, h);
+    // change frame-to-frame on a stable view, so they are drawn again only
+    // when the BackgroundKey changes.
     BackgroundKey cur_key = compute_bg_key(s, s->cur, zoom, origin_tx, origin_ty,
                                            map_w, h, gps_lat, gps_lon, has_gps);
 
     bool cache_hit = s->bg_key_valid &&
                      cur_key == s->bg_key &&
-                     !s->bg_cache.empty() &&
-                     s->bg_cache.rows == h &&
-                     s->bg_cache.cols == map_w &&
-                     s->bg_cache.type() == s->canvas.type();
+                     s->bg_rgb.rows == h &&
+                     s->bg_rgb.cols == map_w;
 
-    if (cache_hit) {
-        s->bg_cache.copyTo(s->canvas(map_rect));
-    } else {
-        // render map into the left portion (0..map_w)
-        composite_tiles(s, s->canvas, zoom, origin_tx, origin_ty, map_w, h);
+    if (!cache_hit) {
+        if (s->bg_rgb.rows != h || s->bg_rgb.cols != map_w) s->bg_rgb = cv::Mat(h, map_w, CV_8UC3);
+        s->bg_rgb.setTo(cv::Scalar(200, 200, 200));
+        composite_tiles(s, s->bg_rgb, zoom, origin_tx, origin_ty, map_w, h);
+        s->static_list.clear();
         // airspace sits between tiles and aircraft so polygons color the map
         // without drowning out icons drawn later
-        render_airspace_layer(s, zoom, origin_tx, origin_ty, map_w, h);
+        render_airspace_layer(s, s->static_list, zoom, origin_tx, origin_ty, map_w, h);
         // airport markers render above airspace but below aircraft so they
         // read as landmarks rather than as traffic
-        render_airports_layer(s, zoom, origin_tx, origin_ty, map_w, h);
+        render_airports_layer(s, s->static_list, zoom, origin_tx, origin_ty, map_w, h);
         if (has_gps) {
-            render_range_rings(s, gps_lat, gps_lon, zoom, origin_tx, origin_ty, map_w, h);
-            render_max_range(s, gps_lat, gps_lon, zoom, origin_tx, origin_ty, map_w, h);
+            render_range_rings(s, s->static_list, gps_lat, gps_lon, zoom, origin_tx, origin_ty, map_w, h);
+            render_max_range(s, s->static_list, gps_lat, gps_lon, zoom, origin_tx, origin_ty, map_w, h);
         }
-
-        // capture the rendered map area for the next frame's blit.
-        s->canvas(map_rect).copyTo(s->bg_cache);
+        s->cpu_drawer.draw(s->bg_rgb.data, static_cast<uint32_t>(map_w), static_cast<uint32_t>(h),
+                           static_cast<uint32_t>(s->bg_rgb.step[0]), SPC_PIXEL_FORMAT_RGB24, s->static_list);
         s->bg_key = cur_key;
         s->bg_key_valid = true;
+        s->bg_image_stale = true;
     }
+
+    auto& list = s->list;
+    list.clear();
+    if (for_gpu) {
+        if (s->bg_image_stale) {
+            s->bg_image.assign(s->bg_rgb.data, static_cast<uint32_t>(map_w), static_cast<uint32_t>(h),
+                               static_cast<uint32_t>(s->bg_rgb.step[0]), SPC_PIXEL_FORMAT_RGB24);
+            s->bg_image_stale = false;
+        }
+        adsb_draw::image_at(list, s->bg_image, 0, 0);
+    }
+    const int32_t font = s->cur.font;
 
     // render waypoints on map
     {
@@ -890,29 +910,28 @@ static int process(SpcPluginInstance* inst, SpcStep* step)
             if (px < -20 || px > map_w + 20 || py < -20 || py > h + 20) continue;
 
             cv::Scalar color;
-            int marker_type = cv::MARKER_DIAMOND;
+            adsb_draw::Marker marker_type = adsb_draw::Marker::Diamond;
             switch (wp.type) {
-                case 0: color = map_contrast_color(s->cur.map_style); marker_type = cv::MARKER_DIAMOND; break;  // waypoint: adaptive diamond
-                case 1: color = {50, 180, 255};  marker_type = cv::MARKER_SQUARE;  break;  // airport: blue square
-                case 2: color = {255, 60, 60};   marker_type = cv::MARKER_STAR;    break;  // military: red star
-                case 3: color = {50, 200, 50};   marker_type = cv::MARKER_TILTED_CROSS; break; // VOR: green cross
-                case 4: color = {255, 180, 50};  marker_type = cv::MARKER_TRIANGLE_UP;  break; // NDB: orange triangle
+                case 0: color = map_contrast_color(s->cur.map_style); marker_type = adsb_draw::Marker::Diamond; break;  // waypoint: adaptive diamond
+                case 1: color = {50, 180, 255};  marker_type = adsb_draw::Marker::Square;  break;  // airport: blue square
+                case 2: color = {255, 60, 60};   marker_type = adsb_draw::Marker::Star;    break;  // military: red star
+                case 3: color = {50, 200, 50};   marker_type = adsb_draw::Marker::TiltedCross; break; // VOR: green cross
+                case 4: color = {255, 180, 50};  marker_type = adsb_draw::Marker::TriangleUp;  break; // NDB: orange triangle
                 default: color = {200, 200, 200}; break;
             }
 
-            cv::drawMarker(s->canvas, {px, py}, color, marker_type, 12, 2, cv::LINE_AA);
+            adsb_draw::marker(list, adsb_draw::px(px, py), marker_type, 12, 2, adsb_draw::rgb(color));
 
             // draw name label with background
             if (wp.name[0] != '\0') {
-                int baseline = 0;
-                auto text_size = cv::getTextSize(wp.name, cv::FONT_HERSHEY_SIMPLEX, 0.35, 1, &baseline);
+                const auto st = adsb_draw::style(font, 0.35, color);
+                const int tw = static_cast<int>(std::lround(adsb_draw::text_width(wp.name, st)));
+                const int th = static_cast<int>(std::lround(adsb_draw::text_height(st)));
                 int lx = px + 8, ly = py - 4;
                 auto wp_label_bg = is_dark_map(s->cur.map_style)
                     ? cv::Scalar(0, 0, 0) : cv::Scalar(240, 240, 240);
-                cv::rectangle(s->canvas, {lx - 1, ly - text_size.height - 1},
-                             {lx + text_size.width + 1, ly + 2}, wp_label_bg, cv::FILLED);
-                cv::putText(s->canvas, wp.name, {lx, ly},
-                           cv::FONT_HERSHEY_SIMPLEX, 0.35, color, 1, cv::LINE_AA);
+                adsb_draw::fill_px(list, lx - 1, ly - th - 1, lx + tw + 1, ly + 2, adsb_draw::rgb(wp_label_bg));
+                adsb_draw::text(list, lx, ly, wp.name, st);
             }
         }
     }
@@ -939,7 +958,7 @@ static int process(SpcPluginInstance* inst, SpcStep* step)
             filtered.push_back(ac);
     }
 
-    render_aircraft_layer(s, filtered, zoom, origin_tx, origin_ty, map_w, h);
+    render_aircraft_layer(s, list, filtered, zoom, origin_tx, origin_ty, map_w, h);
 
     // dest-airport leader line — drawn live (not cached) because it
     // depends on the selected aircraft's current pixel position, which
@@ -957,24 +976,10 @@ static int process(SpcPluginInstance* inst, SpcStep* step)
                 auto ac_px = geo_to_pixel(ac.lat, ac.lon, zoom, origin_tx, origin_ty);
                 auto dest_px = geo_to_pixel(dest_ap->lat, dest_ap->lon,
                                             zoom, origin_tx, origin_ty);
-                cv::Point p0(static_cast<int>(ac_px.x),   static_cast<int>(ac_px.y));
-                cv::Point p1(static_cast<int>(dest_px.x), static_cast<int>(dest_px.y));
-                double dx = p1.x - p0.x, dy = p1.y - p0.y;
-                double len = std::sqrt(dx * dx + dy * dy);
-                if (len >= 5.0) {
-                    constexpr double dash = 8.0, gap = 5.0;
-                    double ux = dx / len, uy = dy / len;
-                    cv::Scalar leader_color(255, 200, 40);
-                    for (double d = 0; d < len; d += dash + gap) {
-                        double d1 = std::min(d + dash, len);
-                        cv::line(s->canvas,
-                                 {static_cast<int>(p0.x + ux * d),
-                                  static_cast<int>(p0.y + uy * d)},
-                                 {static_cast<int>(p0.x + ux * d1),
-                                  static_cast<int>(p0.y + uy * d1)},
-                                 leader_color, 1, cv::LINE_AA);
-                    }
-                }
+                const auto p0 = adsb_draw::px(static_cast<int>(ac_px.x), static_cast<int>(ac_px.y));
+                const auto p1 = adsb_draw::px(static_cast<int>(dest_px.x), static_cast<int>(dest_px.y));
+                if (std::hypot(p1.x - p0.x, p1.y - p0.y) >= 5.0f)
+                    adsb_draw::dashed_line(list, p0, p1, 8, 5, 1, adsb_draw::Color{255, 200, 40});
                 break;
             }
         }
@@ -990,21 +995,12 @@ static int process(SpcPluginInstance* inst, SpcStep* step)
                 auto ac_px = geo_to_pixel(ac.lat, ac.lon, zoom, origin_tx, origin_ty);
 
                 // dashed line from GPS to aircraft
-                cv::Point p0(static_cast<int>(gps_px.x), static_cast<int>(gps_px.y));
-                cv::Point p1(static_cast<int>(ac_px.x), static_cast<int>(ac_px.y));
-                // draw dashed line manually
-                double dx = p1.x - p0.x, dy = p1.y - p0.y;
-                double len = std::sqrt(dx * dx + dy * dy);
-                if (len > 5.0) {
-                    constexpr double dash = 8.0, gap = 5.0;
-                    double ux = dx / len, uy = dy / len;
-                    for (double d = 0; d < len; d += dash + gap) {
-                        double d1 = std::min(d + dash, len);
-                        cv::line(s->canvas,
-                                 {static_cast<int>(p0.x + ux * d), static_cast<int>(p0.y + uy * d)},
-                                 {static_cast<int>(p0.x + ux * d1), static_cast<int>(p0.y + uy * d1)},
-                                 map_contrast_color(s->cur.map_style), 1, cv::LINE_AA);
-                    }
+                const int x0 = static_cast<int>(gps_px.x), y0 = static_cast<int>(gps_px.y);
+                const int x1 = static_cast<int>(ac_px.x), y1 = static_cast<int>(ac_px.y);
+                if (std::hypot(x1 - x0, y1 - y0) > 5.0) {
+                    const auto contrast = map_contrast_color(s->cur.map_style);
+                    adsb_draw::dashed_line(list, adsb_draw::px(x0, y0), adsb_draw::px(x1, y1), 8, 5, 1,
+                                           adsb_draw::rgb(contrast));
 
                     // distance and bearing label at midpoint
                     double dist_km = haversine_km(gps_lat, gps_lon, ac.lat, ac.lon);
@@ -1015,21 +1011,17 @@ static int process(SpcPluginInstance* inst, SpcStep* step)
                     else
                         dist_label = std::format("{:.1f}km {:.0f}deg", dist_km, brg);
 
-                    int mx = (p0.x + p1.x) / 2;
-                    int my = (p0.y + p1.y) / 2;
-                    int baseline = 0;
-                    auto sz = cv::getTextSize(dist_label, cv::FONT_HERSHEY_SIMPLEX, 0.35, 1, &baseline);
+                    int mx = (x0 + x1) / 2;
+                    int my = (y0 + y1) / 2;
+                    const auto st = adsb_draw::style(font, 0.35, contrast);
+                    const int tw = static_cast<int>(std::lround(adsb_draw::text_width(dist_label, st)));
+                    const int th = static_cast<int>(std::lround(adsb_draw::text_height(st)));
                     auto dist_bg = is_dark_map(s->cur.map_style)
                         ? cv::Scalar(0x2e, 0x1e, 0x1e)
                         : cv::Scalar(0xf0, 0xf0, 0xf0);
-                    cv::rectangle(s->canvas,
-                                  {mx - sz.width / 2 - 2, my - sz.height - 2},
-                                  {mx + sz.width / 2 + 2, my + 3},
-                                  dist_bg, cv::FILLED);
-                    cv::putText(s->canvas, dist_label,
-                                {mx - sz.width / 2, my},
-                                cv::FONT_HERSHEY_SIMPLEX, 0.35,
-                                map_contrast_color(s->cur.map_style), 1, cv::LINE_AA);
+                    adsb_draw::fill_px(list, mx - tw / 2 - 2, my - th - 2, mx + tw / 2 + 2, my + 3,
+                                       adsb_draw::rgb(dist_bg));
+                    adsb_draw::text(list, mx - tw / 2, my, dist_label, st);
                 }
                 break;
             }
@@ -1039,12 +1031,23 @@ static int process(SpcPluginInstance* inst, SpcStep* step)
     // map overlay buttons (top-left)
     {
         static const spc::ui::Theme th;
-        s->ui_buttons.begin_frame(s->canvas, w, h);
-        bool gps_clicked = s->ui_buttons.button(
-            "Center GPS", false, has_gps ? th.green : th.surface2);
-        bool fit_clicked = s->ui_buttons.button(
-            "Fit All", false, !filtered.empty() ? th.blue : th.surface2);
-        s->ui_buttons.end_frame();
+        const auto st = adsb_draw::style(font, spc::ui::FONT_CONTROL, th.text);
+        const char* labels[2] = {"Center GPS", "Fit All"};
+        cv::Rect rects[2];
+        int bx = spc::ui::MARGIN;
+        for (int i = 0; i < 2; ++i) {
+            const float tw = adsb_draw::text_width(labels[i], st);
+            const int bw = std::max(static_cast<int>(std::lround(tw)) + 14, 36);
+            const int by = spc::ui::MARGIN, bh = spc::ui::BTN_H;
+            rects[i] = {bx, by, bw, bh};
+            adsb_draw::fill_px(list, bx, by, bx + bw - 1, by + bh - 1, adsb_draw::rgb(th.surface1));
+            adsb_draw::stroke_px(list, bx, by, bx + bw - 1, by + bh - 1, adsb_draw::rgb(th.surface2));
+            adsb_draw::text_vcenter(list, bx + (bw - tw) / 2, by, bh, labels[i], st);
+            bx += bw + spc::ui::BTN_GAP;
+        }
+        s->map_buttons.publish(rects[0], rects[1], w, h);
+        bool gps_clicked = s->map_buttons.take_click(0);
+        bool fit_clicked = s->map_buttons.take_click(1);
 
         if (gps_clicked && has_gps) {
             s->center_lat.store(gps_lat, std::memory_order_relaxed);
@@ -1074,7 +1077,7 @@ static int process(SpcPluginInstance* inst, SpcStep* step)
     }
 
     // compass rose (top-right of map area)
-    render_compass_rose(s, map_w, h);
+    render_compass_rose(s, list, map_w, h);
 
     // status bar (map area only). Show filtered/total count when a filter is
     // hiding anything so the user isn't surprised by a missing aircraft.
@@ -1087,16 +1090,15 @@ static int process(SpcPluginInstance* inst, SpcStep* step)
             status = std::format("Aircraft: {}  Zoom: {:.1f}  Lat: {:.4f}  Lon: {:.4f}",
                                  aircraft.size(), zoom, clat, clon);
         }
-        cv::Mat bar_roi = s->canvas(cv::Rect(0, h - 20, map_w, 20));
-        bar_roi *= 0.4;
-        cv::putText(s->canvas, status, {4, h - 5},
-                   cv::FONT_HERSHEY_SIMPLEX, 0.4, {255, 255, 255}, 1, cv::LINE_AA);
+        list.fill_rect(0, static_cast<float>(h - 20), static_cast<float>(map_w), static_cast<float>(h),
+                       adsb_draw::Color{0, 0, 0, 153});
+        adsb_draw::text(list, 4, h - 5, status, adsb_draw::style(font, 0.4, {255, 255, 255}));
     }
 
     // render aircraft list panel
     if (s->cur.show_list && panel_w > 0) {
         adsb_list::render_aircraft_list(
-            s->canvas, map_w, 0, panel_w, h,
+            list, font, map_w, 0, panel_w, h,
             filtered, s->list_state, s->flag_cache,
             s->first_seen, now,
             s->cur.unit_system);
@@ -1125,7 +1127,7 @@ static int process(SpcPluginInstance* inst, SpcStep* step)
         }
         if (found) {
             adsb_tooltip::render_tooltip(
-                s->canvas, info_icao, ax, ay,
+                list, font, w, h, info_icao, ax, ay,
                 filtered, s->flag_cache, s->first_seen,
                 s->photo_cache,
                 s->cur.info_font_size,
@@ -1159,7 +1161,7 @@ static int process(SpcPluginInstance* inst, SpcStep* step)
         }
         if (found) {
             adsb_airport_tooltip::render_airport_tooltip(
-                s->canvas, info_airport_idx, ax, ay,
+                list, font, w, h, info_airport_idx, ax, ay,
                 s->reference.airports,
                 s->flag_cache,
                 s->cur.info_font_size,
@@ -1187,7 +1189,7 @@ static int process(SpcPluginInstance* inst, SpcStep* step)
                     s->info_panel_waypoint_idx.store(-1, std::memory_order_relaxed);
                 } else {
                     adsb_waypoint_tooltip::render_waypoint_tooltip(
-                        s->canvas, info_wp_idx,
+                        list, font, w, h, info_wp_idx,
                         static_cast<float>(anchor.x),
                         static_cast<float>(anchor.y),
                         s->waypoints,
@@ -1222,7 +1224,7 @@ static int process(SpcPluginInstance* inst, SpcStep* step)
                 s->info_panel_airspace_idx.store(-1, std::memory_order_relaxed);
             } else {
                 adsb_airspace_tooltip::render_airspace_tooltip(
-                    s->canvas, info_airspace_idx,
+                    list, font, w, h, info_airspace_idx,
                     static_cast<float>(anchor_px.x),
                     static_cast<float>(anchor_px.y),
                     s->reference.airspaces,
@@ -1251,16 +1253,16 @@ static int process(SpcPluginInstance* inst, SpcStep* step)
 
             auto outline = map_contrast_color(s->cur.map_style);
             auto halo    = map_halo_color(s->cur.map_style);
-            double fs = 0.35;
-            int baseline = 0;
-            auto sz = cv::getTextSize(label, cv::FONT_HERSHEY_SIMPLEX, fs, 1, &baseline);
+            const auto st = adsb_draw::style(font, 0.35, outline);
+            const int tw = static_cast<int>(std::lround(adsb_draw::text_width(label, st)));
+            const int th = static_cast<int>(std::lround(adsb_draw::text_height(st)));
 
             int lx = static_cast<int>(hx) + 14;
             int ly = static_cast<int>(hy) + 14;
-            if (lx + sz.width > map_w - 4)  lx = static_cast<int>(hx) - sz.width - 6;
-            if (ly + sz.height > h - 4)     ly = static_cast<int>(hy) - 6;
+            if (lx + tw > map_w - 4)  lx = static_cast<int>(hx) - tw - 6;
+            if (ly + th > h - 4)      ly = static_cast<int>(hy) - 6;
 
-            spc::ui::draw_text_outlined(s->canvas, label, {lx, ly}, fs, outline, halo);
+            adsb_draw::text_outlined(list, lx, ly, label, st, halo);
         }
     }
 
@@ -1268,44 +1270,105 @@ static int process(SpcPluginInstance* inst, SpcStep* step)
     // of every other layer. Acquire-load pairs with the release-store in the
     // event handler so anchor / name writes are visible here.
     if (s->delete_confirm_idx.load(std::memory_order_acquire) >= 0) {
-        adsb_waypoint_delete::render(s->canvas,
+        adsb_waypoint_delete::render(list, font, w, h,
                                      s->delete_confirm_anchor_x,
                                      s->delete_confirm_anchor_y,
                                      s->delete_confirm_name);
     }
 
-    // output frame — the canvas uses RGB-in-Scalar convention (Theme is RGB)
-    // but imdecoded images (flags, tiles) are BGR, so swap those channels for output
-    // approach: treat canvas as RGB throughout, convert decoded images on load instead
-    auto now_ns = spc::clock::now_utc_ns(s->host);
+}
 
-    SpcFrame* pool_frame = s->host.frame(
-        0, static_cast<uint32_t>(w), static_cast<uint32_t>(h), SPC_PIXEL_FORMAT_RGB24);
-
-    if (pool_frame) {
-        spc::copy_frame_rows(s->canvas.data, static_cast<uint32_t>(s->canvas.step[0]),
-                             pool_frame->data, pool_frame->stride,
-                             static_cast<uint32_t>(h));
-        pool_frame->sequence = s->sequence;
-        pool_frame->timestamp_ns = now_ns;
-        outputs[0].type = SPC_DATA_FRAME;
-        outputs[0].frame = pool_frame;
-    } else {
-        spc::mat_to_frame(s->canvas, &s->output_frame,
-                          SPC_PIXEL_FORMAT_RGB24, s->sequence, now_ns);
-        outputs[0].type = SPC_DATA_FRAME;
-        outputs[0].frame = &s->output_frame;
-    }
-
+// The engine runs a node with no frame input in a tight loop: pace it.
+static void end_frame(MapDisplayState* s)
+{
     s->sequence++;
-
     // a drag moves the centre on every mouse move: the host hears where it ended
     if (!s->drag_active.load(std::memory_order_relaxed)) push_view(s);
-
     std::this_thread::sleep_for(std::chrono::milliseconds(33));
+}
+
+static int process(SpcPluginInstance* inst, SpcStep* step)
+{
+    auto* s = state(inst);
+    if (step->output_count < 1) return -1;
+    build_frame(s, step, false);
+
+    const int w = s->cur.width;
+    const int h = s->cur.height;
+    const int map_w = s->bg_rgb.cols;
+    SpcFrame* out = s->host.frame(0, static_cast<uint32_t>(w), static_cast<uint32_t>(h), SPC_PIXEL_FORMAT_RGB24);
+    if (!out) {
+        if (s->canvas.rows != h || s->canvas.cols != w) s->canvas = cv::Mat(h, w, CV_8UC3);
+        spc::mat_to_frame(s->canvas, &s->output_frame, SPC_PIXEL_FORMAT_RGB24, 0, 0);
+        out = &s->output_frame;
+    }
+    for (int y = 0; y < h; ++y) {
+        uint8_t* row = out->data + static_cast<size_t>(y) * out->stride;
+        std::memcpy(row, s->bg_rgb.ptr(y), static_cast<size_t>(map_w) * 3);
+        std::memset(row + static_cast<size_t>(map_w) * 3, 200, static_cast<size_t>(w - map_w) * 3);
+    }
+    s->cpu_drawer.draw(out->data, out->width, out->height, out->stride, SPC_PIXEL_FORMAT_RGB24, s->list);
+
+    out->sequence = s->sequence;
+    out->timestamp_ns = spc::clock::now_utc_ns(s->host);
+    step->outputs[0].type = SPC_DATA_FRAME;
+    step->outputs[0].frame = out;
+    end_frame(s);
     return 0;
 }
 
+#ifdef SPC_HAS_VULKAN
+static int record_gpu(SpcPluginInstance* inst, SpcStep* step, SpcGpuPass* pass)
+{
+    auto* s = state(inst);
+    if (!step || !pass || step->output_count < 1 || !s->gpu_ready) return -1;
+    build_frame(s, step, true);
+
+    const auto w = static_cast<uint32_t>(s->cur.width);
+    const auto h = static_cast<uint32_t>(s->cur.height);
+    const uint32_t stride = spc::draw::GpuDrawer::output_stride(w, SPC_PIXEL_FORMAT_RGB24);
+    const uint64_t bytes = static_cast<uint64_t>(stride) * h;
+    SpcFrame* out = s->host.frame(0, w, h, SPC_PIXEL_FORMAT_RGB24);
+    if (!out) return -1;
+    const SpcGpuEdgeBuffer slot = spc::acquire_ringed_output(pass, 0, w, h, stride, SPC_PIXEL_FORMAT_RGB24,
+                                                             bytes, bytes);
+    if (!slot.device_buffer || slot.gpu_handle == 0) {
+        s->host.release_frame(out);
+        return -1;
+    }
+    const spc::draw::GpuFrame dst{static_cast<VkBuffer>(slot.device_buffer), w, h, stride,
+                                  SPC_PIXEL_FORMAT_RGB24};
+    if (!s->gpu_drawer.record(*s->vk, pass, {}, dst, s->list, {}, spc::draw::Filter::Area, {200, 200, 200, 255})) {
+        s->host.release_frame(out);
+        return -1;
+    }
+
+    out->gpu_handle = slot.gpu_handle;
+    out->gpu_flags |= SPC_GPU_FLAG_RESIDENT;
+    out->sequence = s->sequence;
+    out->timestamp_ns = spc::clock::now_utc_ns(s->host);
+    step->outputs[0].type = SPC_DATA_FRAME;
+    step->outputs[0].frame = out;
+    end_frame(s);
+    return 0;
+}
+#endif
+
+#ifdef SPC_HAS_VULKAN
+SPC_EXPORT_PLUGIN_SLOTS(
+    .info              = info,
+    .create_instance   = create_instance,
+    .destroy_instance  = destroy_instance,
+    .params_changed    = params_changed,
+    .param_rules       = param_rules,
+    .process           = process,
+    .start             = start,
+    .stop              = stop,
+    .set_host_services = set_host_services,
+    .ui_input          = ui_input,
+    .record_gpu        = record_gpu,
+    .interrupt         = request_stop)
+#else
 SPC_EXPORT_PLUGIN_SLOTS(
     .info              = info,
     .create_instance   = create_instance,
@@ -1318,3 +1381,4 @@ SPC_EXPORT_PLUGIN_SLOTS(
     .set_host_services = set_host_services,
     .ui_input          = ui_input,
     .interrupt         = request_stop)
+#endif

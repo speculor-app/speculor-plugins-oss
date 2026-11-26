@@ -242,7 +242,7 @@ int handle_event(MapDisplayState* s, const SpcUiInput* event)
     int h = p.height;
 
     // let overlay buttons register clicks (don't consume — map still needs the event)
-    s->ui_buttons.handle_event(event, nullptr, 0, nullptr);
+    s->map_buttons.handle_event(event);
 
     // determine if cursor is over the list panel
     int map_w = s->last_map_w.load(std::memory_order_relaxed);
