@@ -7,7 +7,6 @@
 
 #include "adsb_display_state.h"
 #include "draw_helpers.h"
-#include <spc_ui_theme.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -57,7 +56,7 @@ inline bool contains(const cv::Rect& r, float px, float py)
 inline void render(adsb_draw::DrawList& list, int32_t font, int canvas_w, int canvas_h,
                    float anchor_x, float anchor_y, const char* wp_name)
 {
-    static const spc::ui::Theme theme;
+    static const adsb_draw::Theme theme;
 
     adsb_draw::fill_px(list, 0, 0, canvas_w - 1, canvas_h - 1, adsb_draw::rgb({0, 0, 0}, 0.45));
 

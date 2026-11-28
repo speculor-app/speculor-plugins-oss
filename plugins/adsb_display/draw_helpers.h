@@ -1,12 +1,11 @@
 #pragma once
 
 // DrawList helpers for the ADS-B Display layers and panels. The plugin's
-// colours are cv::Scalar in RGB order (spc::ui::Theme's), and its layout works
+// colours are cv::Scalar in RGB order (Theme's), and its layout works
 // in OpenCV's integer pixels: (x, y) is the pixel whose centre is (x + 0.5, y + 0.5).
 
 #include <draw/draw_list.h>
 #include <draw/image.h>
-#include <spc_ui_theme.h>
 
 #include <opencv2/core.hpp>
 
@@ -26,6 +25,27 @@ using spc::draw::TextStyle;
 
 // text size in pixels per unit of the OpenCV font scale the parameters were set in
 inline constexpr float kPxPerFontScale = 28.f;
+
+// Catppuccin Mocha
+struct Theme {
+    cv::Scalar bg{0x1e, 0x1e, 0x2e};
+    cv::Scalar panel_bg{0x30, 0x2a, 0x3b};
+    cv::Scalar surface1{0x45, 0x47, 0x5a};
+    cv::Scalar surface2{0x58, 0x5c, 0x6e};
+    cv::Scalar text{0xcd, 0xd6, 0xf4};
+    cv::Scalar subtext{0xa6, 0xad, 0xc8};
+    cv::Scalar green{0xa6, 0xe3, 0x70};
+    cv::Scalar blue{0x89, 0xba, 0xf3};
+    cv::Scalar peach{0xfa, 0xb4, 0x7a};
+    cv::Scalar red{0xf3, 0x6b, 0x62};
+    cv::Scalar yellow{0xf9, 0xe7, 0x72};
+};
+
+// the map's buttons
+inline constexpr int kMargin = 10;
+inline constexpr int kButtonHeight = 26;
+inline constexpr int kButtonGap = 4;
+inline constexpr double kButtonFont = 0.35;
 
 inline Color rgb(const cv::Scalar& c, double opacity = 1.0)
 {
@@ -66,20 +86,20 @@ inline void text(DrawList& list, double x, double y, std::string_view s, const T
     list.text({static_cast<float>(x), static_cast<float>(y)}, s, st);
 }
 
-// top at y (spc::ui::draw_text_at)
+// top at y
 inline void text_top(DrawList& list, double x, double y, std::string_view s, const TextStyle& st)
 {
     text(list, x, y + text_height(st), s, st);
 }
 
-// centred in [y, y + h) (spc::ui::draw_text_vcenter)
+// centred in [y, y + h)
 inline void text_vcenter(DrawList& list, double x, double y, double h, std::string_view s, const TextStyle& st)
 {
     const float th = text_height(st);
     text(list, x, y + (h - th) / 2 + th, s, st);
 }
 
-// right-aligned in [x, x + col_w), centred in [y, y + h), never left of min_x (spc::ui::draw_text_right)
+// right-aligned in [x, x + col_w), centred in [y, y + h), never left of min_x
 inline void text_right(DrawList& list, double x, double col_w, double y, double h, std::string_view s,
                        const TextStyle& st, double min_x = 0)
 {
@@ -87,7 +107,7 @@ inline void text_right(DrawList& list, double x, double col_w, double y, double 
     text_vcenter(list, tx, y, h, s, st);
 }
 
-// a halo round the glyphs, for labels over an unknown background (spc::ui::draw_text_outlined)
+// a halo round the glyphs, for labels over an unknown background
 inline void text_outlined(DrawList& list, double x, double y, std::string_view s, TextStyle st,
                           const cv::Scalar& halo, float outline_px = 1.f)
 {

@@ -141,7 +141,7 @@ void render_max_range(MapDisplayState* s, DrawList& list,
 
 void render_compass_rose(MapDisplayState* s, DrawList& list, int map_w, int h)
 {
-    static const spc::ui::Theme th;
+    static const adsb_draw::Theme th;
 
     int radius = 28;
     int ext = radius + 12;
