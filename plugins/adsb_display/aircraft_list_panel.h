@@ -6,7 +6,6 @@
 #include "aircraft_tooltip.h"
 #include "country_flags.h"
 #include "draw_helpers.h"
-#include <spc_ui_theme.h>
 
 #include <algorithm>
 #include <chrono>
@@ -126,7 +125,7 @@ inline void render_aircraft_list(
 {
     if (panel_w < 100 || panel_h < HEADER_H + ROW_H) return;
 
-    static const spc::ui::Theme theme;
+    static const adsb_draw::Theme theme;
 
     adsb_draw::fill_px(list, panel_x, panel_y, panel_x + panel_w - 1, panel_y + panel_h - 1,
                        adsb_draw::rgb(theme.panel_bg));

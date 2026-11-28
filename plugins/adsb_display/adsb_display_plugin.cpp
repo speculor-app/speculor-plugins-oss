@@ -1030,20 +1030,20 @@ static void build_frame(MapDisplayState* s, const SpcStep* step, bool for_gpu)
 
     // map overlay buttons (top-left)
     {
-        static const spc::ui::Theme th;
-        const auto st = adsb_draw::style(font, spc::ui::FONT_CONTROL, th.text);
+        static const adsb_draw::Theme th;
+        const auto st = adsb_draw::style(font, adsb_draw::kButtonFont, th.text);
         const char* labels[2] = {"Center GPS", "Fit All"};
         cv::Rect rects[2];
-        int bx = spc::ui::MARGIN;
+        int bx = adsb_draw::kMargin;
         for (int i = 0; i < 2; ++i) {
             const float tw = adsb_draw::text_width(labels[i], st);
             const int bw = std::max(static_cast<int>(std::lround(tw)) + 14, 36);
-            const int by = spc::ui::MARGIN, bh = spc::ui::BTN_H;
+            const int by = adsb_draw::kMargin, bh = adsb_draw::kButtonHeight;
             rects[i] = {bx, by, bw, bh};
             adsb_draw::fill_px(list, bx, by, bx + bw - 1, by + bh - 1, adsb_draw::rgb(th.surface1));
             adsb_draw::stroke_px(list, bx, by, bx + bw - 1, by + bh - 1, adsb_draw::rgb(th.surface2));
             adsb_draw::text_vcenter(list, bx + (bw - tw) / 2, by, bh, labels[i], st);
-            bx += bw + spc::ui::BTN_GAP;
+            bx += bw + adsb_draw::kButtonGap;
         }
         s->map_buttons.publish(rects[0], rects[1], w, h);
         bool gps_clicked = s->map_buttons.take_click(0);

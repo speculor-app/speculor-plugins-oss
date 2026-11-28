@@ -10,7 +10,6 @@
 #include "aircraft_tooltip.h"   // reuse PanelCtx, TT_PAD, TT_OFFSET
 #include "draw_helpers.h"
 
-#include <spc_ui_theme.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -57,7 +56,7 @@ inline void render_waypoint_tooltip(
         || static_cast<size_t>(waypoint_idx) >= waypoints.size()) return;
     const auto& wp = waypoints[waypoint_idx];
 
-    static const spc::ui::Theme theme;
+    static const adsb_draw::Theme theme;
 
     double fs = static_cast<double>(font_size);
     double fs_big = fs * 1.3;

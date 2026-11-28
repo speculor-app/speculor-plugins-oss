@@ -9,7 +9,6 @@
 #include "aircraft_tooltip.h"   // reuse PanelCtx, TT_PAD, TT_OFFSET
 #include "draw_helpers.h"
 
-#include <spc_ui_theme.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -54,7 +53,7 @@ inline void render_airspace_tooltip(
         || static_cast<size_t>(airspace_idx) >= airspaces.size()) return;
     const auto& a = airspaces[airspace_idx];
 
-    static const spc::ui::Theme theme;
+    static const adsb_draw::Theme theme;
 
     double fs = static_cast<double>(font_size);
     double fs_big = fs * 1.2;

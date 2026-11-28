@@ -6,7 +6,6 @@
 #include "country_flags.h"
 #include "draw_helpers.h"
 #include <draw/image.h>
-#include <spc_ui_theme.h>
 
 #include <chrono>
 #include <cmath>
@@ -80,7 +79,7 @@ inline const char* type_label(uint8_t category, uint8_t db_flags)
 
 inline cv::Scalar type_color(uint8_t category, uint8_t db_flags)
 {
-    static const spc::ui::Theme th;
+    static const adsb_draw::Theme th;
     switch (adsb_classify_type(category, db_flags)) {
         case 0:  return th.green;
         case 1:  return th.red;
@@ -117,7 +116,7 @@ struct PanelCtx
     int cy;              // current y cursor (advances after each row)
     double fs;           // base font scale
     int line_h;          // row height
-    const spc::ui::Theme& th;
+    const adsb_draw::Theme& th;
 
     // Offset from a row's left edge to its value, so values line up down the card
     // instead of each starting right after its own label.
@@ -201,7 +200,7 @@ inline void render_tooltip(
     }
     if (!ac) return;
 
-    static const spc::ui::Theme theme;
+    static const adsb_draw::Theme theme;
     auto now = std::chrono::steady_clock::now();
 
     double fs = static_cast<double>(font_size);

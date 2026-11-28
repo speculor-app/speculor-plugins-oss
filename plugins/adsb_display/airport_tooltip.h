@@ -10,7 +10,6 @@
 #include "country_flags.h"
 #include "draw_helpers.h"
 
-#include <spc_ui_theme.h>
 
 #include <algorithm>
 #include <cmath>
@@ -45,7 +44,7 @@ inline void render_airport_tooltip(
         || static_cast<size_t>(airport_idx) >= airports.size()) return;
     const auto& a = airports[airport_idx];
 
-    static const spc::ui::Theme theme;
+    static const adsb_draw::Theme theme;
 
     double fs = static_cast<double>(font_size);
     double fs_big = fs * 1.3;
